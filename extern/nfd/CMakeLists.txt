@@ -1,0 +1,5 @@
+if (NOT TARGET nfd)
+    add_subdirectory(src)
+else()
+    message(STATUS "nfd is already a target. Skipping adding it twice")
+endif()
