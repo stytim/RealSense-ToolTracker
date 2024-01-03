@@ -1000,7 +1000,11 @@ void IRToolTracker::CalibrateTool()
 	// Calculate the average marker positions
 	markerPositions.clear();
 	markerPositions.reserve(NUM_CALIBRATION_SPHERES * 3);
-	for (int i = 0; i < NUM_CALIBRATION_SPHERES; i++)
+	markerPositions.push_back(0);
+	markerPositions.push_back(0);
+	markerPositions.push_back(0);
+	std::cout << "Marker 1: " << markerPositions[0] << ", " << markerPositions[1] << ", " << markerPositions[2] << std::endl;
+	for (int i = 1; i < NUM_CALIBRATION_SPHERES; i++)
 	{
 		Eigen::Vector3f filteredMean = calculateMean(removeOutliers(markerPoints[i], 2.0f));
 		
@@ -1012,7 +1016,7 @@ void IRToolTracker::CalibrateTool()
 		markerPositions.push_back((x == -0.0f) ? 0.0f : x);
 		markerPositions.push_back((y == -0.0f) ? 0.0f : y);
 		markerPositions.push_back((z == -0.0f) ? 0.0f : z);
-		std::cout << "Marker " << i << ": " << markerPositions[i * 3] << ", " << markerPositions[i * 3 + 1] << ", " << markerPositions[i * 3 + 2] << std::endl;
+		std::cout << "Marker " << i+1 << ": " << markerPositions[i * 3] << ", " << markerPositions[i * 3 + 1] << ", " << markerPositions[i * 3 + 2] << std::endl;
 	}
 
 	m_bIsCurrentlyCalibrating = false;

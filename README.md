@@ -54,6 +54,27 @@ Due to certain permissions and security features in MacOS, you might need to run
 ```bash
 sudo ./ir-tracking-app
 ```
+## RealSense Camera Modification: Adding a Light Diffuser
+
+The laser projector of the RealSense camera emits a sharp, focused IR dot pattern. While this is generally beneficial for depth sensing, it is not ideal for doing thresholding on IR stream to find retroreflective surfaces.
+
+Therefore, a crucial modification is required: the addition of a physical light diffuser filter in front of the camera's laser projector. This softens the laser dot pattern in the IR stream. 
+    <table>
+        <tr>
+            <td align="center" width="45%">
+                <img src="image/light_diffuser.jpg" alt="Box A"><br>
+                Bounding Box Creation (Touch)
+            </td>
+            <td align="center" width="45%">
+                <img src="figures/boxb.png" alt="Box B"><br>
+                Bounding Box Creation(Hybrid)
+            </td>
+        </tr>
+    </table>
+</p>
+
+
+
 
 ## Usage Guide
 
