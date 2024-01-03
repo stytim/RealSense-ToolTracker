@@ -62,12 +62,12 @@ Therefore, a crucial modification is required: the addition of a physical light 
     <table>
         <tr>
             <td align="center" width="45%">
-                <img src="image/light_diffuser.jpg" alt="Box A"><br>
-                Bounding Box Creation (Touch)
+                <img src="image/light_diffuser.jpg" alt="RealSense with light diffuser"><br>
+                RealSense with Light Diffuser
             </td>
             <td align="center" width="45%">
-                <img src="figures/boxb.png" alt="Box B"><br>
-                Bounding Box Creation(Hybrid)
+                <img src="image/no_diffuser.png" alt="Without Light Diffuser"><br>
+                Without Light Diffuser, the visible dot pattern can interfere with detecting retroreflective surfaces in the IR stream.
             </td>
         </tr>
     </table>
