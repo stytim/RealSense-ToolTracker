@@ -8,7 +8,6 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/imgcodecs/imgcodecs.hpp>
 
-#include <Eigen/Eigen>
 #include <mutex>
 #include <queue>
 #include <condition_variable>
@@ -69,7 +68,8 @@ class IRToolTracking {
 public:
     IRToolTracking();
 
-    void initialize(int width, int height);
+    void queryDevices();
+    void initialize(int index, int width, int height);
     void StartToolCalibration();
     void StopToolCalibration();
     void processStreams();
@@ -90,7 +90,7 @@ public:
     void SetMinMaxSize(int min, int max);
     void GetMinMaxSize(int &min, int &max);
 
-
+    std::vector<std::string>& getDeviceList() { return deviceNames; }
     bool DeprojectPixelToPoint(float(&uvd)[3], float(&xy)[2]);
     bool ProjectPointToPixel(float(&xyz)[3], float(&uv)[2]);
     std::vector<float> GetToolTransform(std::string identifier);
@@ -131,6 +131,8 @@ private:
 
     bool intrinsics_found = false;
 
+    std::vector<std::string> deviceNames;
+
     rs2::context ctx;
 
     // RealSense pipeline to manage streaming
@@ -140,6 +142,10 @@ private:
     rs2::config config;
 
     rs2::pipeline_profile profile;
+
+    rs2::device_list devices;
+
+    //std::vector<rs2::device> devices;
 
     rs2::device dev;
 

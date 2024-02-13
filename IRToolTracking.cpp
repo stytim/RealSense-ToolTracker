@@ -7,16 +7,29 @@ IRToolTracking::IRToolTracking() {
     // Constructor: Initialize any required variables or state
 }
 
-void IRToolTracking::initialize(int width, int height) {
+void IRToolTracking::queryDevices() {
+	devices = ctx.query_devices();
+    deviceNames.clear();
+	if (devices.size() == 0) {
+		std::cerr << "No RealSense devices found." << std::endl;
+		return;
+	}
+	for (size_t i = 0; i < devices.size(); i++) {
+        std::stringstream ss;
+        ss << "[" << i << "] " << devices[i].get_info(RS2_CAMERA_INFO_NAME) << " (" << devices[i].get_info(RS2_CAMERA_INFO_SERIAL_NUMBER) << ")";
+        deviceNames.push_back(ss.str());
+	}
+}
 
-    rs2::device_list devices = ctx.query_devices();
-    if (devices.size() == 0) {
-        std::cerr << "No RealSense devices found." << std::endl;
+void IRToolTracking::initialize(int index, int width, int height) {
+
+    if (index < 0 || index >= devices.size()) {
+        std::cerr << "Invalid device index." << std::endl;
         Terminated = true;
         return;
     }
 
-    dev = devices.front();
+    dev = devices[index];
     std::string model_name = dev.get_info(RS2_CAMERA_INFO_NAME);
     if (model_name == "Intel RealSense D415") {
         irThreshold = 100;
@@ -34,6 +47,9 @@ void IRToolTracking::initialize(int width, int height) {
     frame_width = width;
     frame_height = height;
     // Configure the RealSense pipeline
+
+    config.enable_device(dev.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER));
+
     config.enable_stream(RS2_STREAM_INFRARED, 1, frame_width, frame_height, RS2_FORMAT_Y8, 90);
     config.enable_stream(RS2_STREAM_DEPTH, frame_width, frame_height, RS2_FORMAT_Z16, 90);
 
@@ -122,6 +138,7 @@ void IRToolTracking::processStreams() {
 void IRToolTracking::shutdown() {
     // Clean up resources as necessary
     pipeline.stop();
+    config.disable_all_streams();
     trackingFrame.release();
     depthFrame.release();
 }

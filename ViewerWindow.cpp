@@ -269,6 +269,11 @@ void ViewerWindow::Render() {
                                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
                                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoScrollbar;
 
+    tracker.queryDevices();
+    auto& deviceList = tracker.getDeviceList();
+    static int selectedDeviceIndex = deviceList.size() > 0 ? 0: -1;
+    static std::string currentDevice = deviceList.size() > 0 ? deviceList[0] : "No Device Available";
+    float windowWidth = 350.0f;
     // Main loop for GUI operations
     while (!Terminated && !glfwWindowShouldClose(window)) {
         
@@ -282,8 +287,40 @@ void ViewerWindow::Render() {
         
         ImGui::NewFrame();
 
-        // Number of Tools Window
+        // Create ImGui window
         ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(windowWidth, 0.0f));
+        ImGui::Begin("Device Selection", nullptr, overlayFlags);
+        // Dropdown menu for devices
+        if (ImGui::BeginCombo("Devices", currentDevice.c_str())) {
+            for (int i = 0; i < deviceList.size(); i++) {
+                bool isSelected = (currentDevice == deviceList[i]);
+                if (ImGui::Selectable(deviceList[i].c_str(), isSelected)) {
+                    currentDevice = deviceList[i];
+                    selectedDeviceIndex = i;
+                }
+                // Set the initial focus when opening the combo (scrolling + keyboard navigation focus)
+                if (isSelected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Refresh")) {
+			tracker.queryDevices();
+			deviceList = tracker.getDeviceList();
+			if (deviceList.size() > 0) {
+				currentDevice = deviceList[0];
+				selectedDeviceIndex = 0;
+			}
+		}
+
+        ImGui::End();
+
+        // Number of Tools Window
+        ImGui::SetNextWindowPos(ImVec2(20, 60), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(windowWidth, 0.0f));
         ImGui::Begin("Tools to Track", nullptr, overlayFlags);
         ImGui::InputInt("Number of Tools", &numTools);
         ImGui::End();
@@ -295,7 +332,8 @@ void ViewerWindow::Render() {
             tools.resize(numTools);
         }
 
-        ImGui::SetNextWindowPos(ImVec2(20, 60), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(20, 100), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(windowWidth, 0.0f));
         ImGui::Begin("Tool Definitions", nullptr, overlayFlags);
 
         for (int toolIdx = 0; toolIdx < numTools; ++toolIdx)
@@ -352,7 +390,7 @@ void ViewerWindow::Render() {
                     if (ImGui::Button(("Calibrate Tool##" + std::to_string(toolIdx)).c_str()))
                     {
                         std::cout << "Calibrating tool " << toolIdx + 1 << std::endl;
-                        tracker.initialize(640, 480);
+                        tracker.initialize(selectedDeviceIndex, 640, 480);
                         tracker.StartToolCalibration();
                         calibrationInitiated = true;
                         toolId = toolIdx;
@@ -400,7 +438,7 @@ void ViewerWindow::Render() {
             ImGui::Begin("Tracking Control", nullptr, overlayFlags);
             if (!tracker.IsTrackingTools()) {
                 if (ImGui::Button("Start Tracking")) {
-                    tracker.initialize(640 ,480);
+                    tracker.initialize(selectedDeviceIndex, 640 ,480);
                     tracker.StartToolTracking();
                     processingThread = std::make_shared<std::thread>([this]() {
                     this->tracker.processStreams();
@@ -453,12 +491,10 @@ void ViewerWindow::Render() {
         {
             if (udpEnabled)
             {
-                std::cout << "UDP enabled" << std::endl;
                 udpThread = std::make_shared<std::thread>(&ViewerWindow::UdpThreadFunction, this);
             }
             else
             {
-                std::cout << "UDP disabled" << std::endl;
                 udpEnabled = false;
                 JoinThread(udpThread);
             }

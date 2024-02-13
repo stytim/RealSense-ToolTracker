@@ -53,22 +53,18 @@ struct ToolResult
 	float error{ 0 };
 	std::vector<int> occluded_nodes;
 	float dist_to_prev{ 0 };
-	static bool compare(ToolResult a, ToolResult b)
+	static bool compare(const ToolResult& a, const ToolResult& b)
 	{
-		if (a.occluded_nodes.size() < b.occluded_nodes.size()) {
+		if (a.occluded_nodes.size() < b.occluded_nodes.size())
 			return true;
-		}
-		else if (a.occluded_nodes.size() < b.occluded_nodes.size()) {
+		else if (a.occluded_nodes.size() > b.occluded_nodes.size())
 			return false;
-		}
 		//Results have same amount of spheres visisble
-		if (a.dist_to_prev < b.dist_to_prev) {
+		if (a.dist_to_prev < b.dist_to_prev)
 			return true;
-		}
-		if (a.error < b.error) {
-			return true;
-		}
-		return false;
+		else if (a.dist_to_prev > b.dist_to_prev)
+			return false;
+		return a.error < b.error;
 	}
 };
 

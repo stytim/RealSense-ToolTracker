@@ -1,6 +1,6 @@
 #include "IRToolTrack.h"
 #include "IRToolTracking.h"
-
+#include <Eigen/Eigen>
 #include <set>
 
 
@@ -351,9 +351,9 @@ cv::Mat IRToolTracker::MatchPointsKabsch(IRTrackedTool tool, ProcessedAHATFrame 
 
 		cv::Mat sphere_frame_mat = cv::Mat(4, 1, CV_32F);
 		sphere_frame_mat.at<float>(0, 0) = sphere_frame[0];
-		sphere_frame_mat.at<float>(0, 1) = sphere_frame[1];
-		sphere_frame_mat.at<float>(0, 2) = sphere_frame[2];
-		sphere_frame_mat.at<float>(0, 3) = 1.f;
+		sphere_frame_mat.at<float>(1, 0) = sphere_frame[1];
+		sphere_frame_mat.at<float>(2, 0) = sphere_frame[2];
+		sphere_frame_mat.at<float>(3, 0) = 1.f;
 
 		//Copy translation 
 		float uv[2] = { 0, 0};
