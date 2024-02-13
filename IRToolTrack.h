@@ -5,6 +5,7 @@
 #include <thread>
 #include <cstdint>
 
+#include <Eigen/Eigen>
 #include <opencv2/core.hpp>
 #include <opencv2/video/tracking.hpp>
 

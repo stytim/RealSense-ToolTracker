@@ -28,6 +28,7 @@ public class UDPToolTrackingReceiver : MonoBehaviour
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi, Pack = 1)]
     public struct ToolTrackingData
     {
+        public long serialNumber; 
         public double timestamp;
         public float posX;
         public float posY;

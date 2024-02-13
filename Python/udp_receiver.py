@@ -16,14 +16,16 @@ def main():
             data, addr = sock.recvfrom(1024)  # buffer size
 
             # Unpack the data according to the structure
-            unpacked_data = struct.unpack('dfff ffff i', data)
+            unpacked_data = struct.unpack('q d fff ffff i', data)
 
-            timestamp = unpacked_data[0]
-            position = unpacked_data[1:4]
-            quaternion = unpacked_data[4:8]
-            toolId = unpacked_data[8]
+            serialNumber = unpacked_data[0]
+            timestamp = unpacked_data[1]
+            position = unpacked_data[2:5]
+            quaternion = unpacked_data[5:9]
+            toolId = unpacked_data[9]
 
             print(f"Received from {addr}:")
+            print(f"Serial number: {serialNumber}")
             print(f"Timestamp: {timestamp}")
             print(f"Position: {position}")
             print(f"Quaternion: {quaternion}")

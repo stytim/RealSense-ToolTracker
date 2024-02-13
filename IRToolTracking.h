@@ -145,8 +145,6 @@ private:
 
     rs2::device_list devices;
 
-    //std::vector<rs2::device> devices;
-
     rs2::device dev;
 
     rs2_intrinsics intrinsics;

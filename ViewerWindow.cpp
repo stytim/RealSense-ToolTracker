@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <regex>
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
@@ -165,6 +166,16 @@ void ViewerWindow::ProcessInput() {
     // Process input
 }
 
+Eigen::Matrix4f ViewerWindow::TrackingDataToMatrix(const TrackingData& data)
+{
+	Eigen::Quaternionf q(data.quaternion[3], data.quaternion[0], data.quaternion[1], data.quaternion[2]);
+	Eigen::Vector3f t(data.position[0], data.position[1], data.position[2]);
+    Eigen::Matrix4f matrix = Eigen::Matrix4f::Identity();
+	matrix.block<3, 3>(0, 0) = q.toRotationMatrix();
+	matrix.block<3, 1>(0, 3) = t;
+    return matrix;
+}
+
 bool ViewerWindow::Connect(const char *host, int port) {
     if (nanosockets_initialize())
     {
@@ -212,6 +223,90 @@ void ViewerWindow::Disconnect()
     }
 }
 
+void ViewerWindow::UdpReceiveThreadFunction()
+{
+    if (nanosockets_initialize())
+    {
+        std::cerr << "Error initializing socket library" << std::endl;
+        return;
+    }
+
+	receiveSocket = nanosockets_create(0, 0);
+    if (receiveSocket < 0)
+    {
+		std::cerr << "Failed to create a socket." << std::endl;
+		return;
+	}
+
+	NanoAddress receiveAddress = {};
+	receiveAddress.port = static_cast<uint16_t>(m_receiveport);
+
+    if (nanosockets_address_set_ip(&receiveAddress, "0.0.0.0"))
+    {
+		std::cerr << "Error setting default address" << std::endl;
+		return;
+	}
+    
+    if (nanosockets_bind(receiveSocket, &receiveAddress))
+    {
+		std::cerr << "Failed to bind to port " << m_port << std::endl;
+		return;
+	}
+
+    while (multiEnabled)
+    {
+		std::vector<uint8_t> buffer(sizeof(TrackingData));
+        if (nanosockets_receive(receiveSocket, &receiveAddress, buffer.data(), buffer.size()) < 0)
+        {
+			std::cerr << "Failed to receive tracking data" << std::endl;
+		}
+        else
+        {
+			TrackingData data;
+			std::memcpy(&data, buffer.data(), sizeof(TrackingData));
+			std::cout << "Received tracking data for tool ID " << data.toolId << " from " << data.serialNumber <<std::endl;
+            // print received address
+            //char ip[16];
+            //nanosockets_address_get_ip(&receiveAddress, ip, sizeof(ip));
+            //std::cout << "Received from " << ip << ":" << receiveAddress.port << std::endl;
+
+            if (tracker.IsTrackingTools())
+            {
+                for (size_t id = 0; id < tools.size(); ++id)
+                {
+                    if (data.toolId == id + 1)
+                    {
+                        //check if the serial number is in the extrinsics map, if not, add it
+                        if (extrinsics.find(data.serialNumber) == extrinsics.end())
+                        {
+                            std::vector<float> tool_transform = tracker.GetToolTransform(tools[id].toolName);
+                            if (!tool_transform.empty() && !std::isnan(tool_transform[0]) && tool_transform[7] != 0)
+                            {
+                                // tool_transform to matrix
+                                Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
+                                transform.block<3, 3>(0, 0) = Eigen::Quaternionf(tool_transform[6], tool_transform[3], tool_transform[4], tool_transform[5]).toRotationMatrix();
+                                transform.block<3, 1>(0, 3) = Eigen::Vector3f(tool_transform[0], tool_transform[1], tool_transform[2]);
+
+                                extrinsics[data.serialNumber] = transform * TrackingDataToMatrix(data).inverse();
+                            }
+                        }
+
+                        Eigen::Matrix4f extrinsic = extrinsics[data.serialNumber];
+                        Eigen::Matrix4f new_transform = TrackingDataToMatrix(data) * extrinsic;
+
+                        //std::cout << extrinsic << std::endl;
+                        //std::cout << new_transform << std::endl;
+					}
+                }
+            }
+
+		}
+	}
+
+	nanosockets_destroy(&receiveSocket);
+	nanosockets_deinitialize();
+}
+
 void ViewerWindow::UdpThreadFunction()
 {
     if (!Connect(ipAddress, m_port))
@@ -231,10 +326,11 @@ void ViewerWindow::UdpThreadFunction()
                 if (!tool_transform.empty() && !std::isnan(tool_transform[0]) && tool_transform[7] != 0)
                 {
                     TrackingData data;
-                    std::copy(tool_transform.begin(), tool_transform.begin() + 3, data.position); // Assuming first 3 are position
-                    std::copy(tool_transform.begin() + 3, tool_transform.end(), data.quaternion); // Next 4 are quaternion
+                    std::copy(tool_transform.begin(), tool_transform.begin() + 3, data.position); 
+                    std::copy(tool_transform.begin() + 3, tool_transform.end(), data.quaternion); 
                     data.toolId = static_cast<int>(id) + 1;                                        
                     data.timestamp = glfwGetTime();
+                    data.serialNumber = serialNumber;
 
                     if (m_connected) {
                         // Serialize data
@@ -258,6 +354,20 @@ void ViewerWindow::UdpThreadFunction()
     Disconnect();
 }
 
+void ViewerWindow::GetSerialNumber()
+{
+    std::regex re("\\b(\\d{12})\\b"); // Regular expression to match a 12-digit number
+    std::smatch match;
+
+    if (std::regex_search(currentDevice, match, re) && match.size() > 0) {
+        std::string numberStr = match.str(0); // The first match in the string
+
+        // Convert string to long long
+        std::istringstream iss(numberStr);
+        iss >> serialNumber;
+    }
+}
+
 void ViewerWindow::Render() {
 
     // Generate textures
@@ -272,7 +382,8 @@ void ViewerWindow::Render() {
     tracker.queryDevices();
     auto& deviceList = tracker.getDeviceList();
     static int selectedDeviceIndex = deviceList.size() > 0 ? 0: -1;
-    static std::string currentDevice = deviceList.size() > 0 ? deviceList[0] : "No Device Available";
+    currentDevice = deviceList.size() > 0 ? deviceList[0] : "No Device Available";
+    GetSerialNumber();
     float windowWidth = 350.0f;
     // Main loop for GUI operations
     while (!Terminated && !glfwWindowShouldClose(window)) {
@@ -298,6 +409,8 @@ void ViewerWindow::Render() {
                 if (ImGui::Selectable(deviceList[i].c_str(), isSelected)) {
                     currentDevice = deviceList[i];
                     selectedDeviceIndex = i;
+                    std::cout << "Selected device: " << currentDevice << std::endl;
+                    GetSerialNumber();
                 }
                 // Set the initial focus when opening the combo (scrolling + keyboard navigation focus)
                 if (isSelected) {
@@ -313,7 +426,13 @@ void ViewerWindow::Render() {
 			if (deviceList.size() > 0) {
 				currentDevice = deviceList[0];
 				selectedDeviceIndex = 0;
+                GetSerialNumber();
 			}
+            else
+            {
+                currentDevice = "No Device Available";
+                selectedDeviceIndex = -1;
+            }
 		}
 
         ImGui::End();
@@ -502,6 +621,25 @@ void ViewerWindow::Render() {
         ImGui::End();
         frequency = std::max(frequency, 1);
 
+        ImGui::SetNextWindowPos(ImVec2(720, 80), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Multi-Camera Settings", nullptr, overlayFlags);
+        if (ImGui::Checkbox("Multi-Camera", &multiEnabled))
+        {
+            if (multiEnabled)
+            {
+                udpReceiveThread = std::make_shared<std::thread>(&ViewerWindow::UdpReceiveThreadFunction, this);
+            }
+            else
+            {
+                multiEnabled = false;
+                JoinThread(udpReceiveThread);
+            }
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(50);
+        ImGui::InputInt("Receive Port", &m_receiveport, 0, 0, ImGuiInputTextFlags_CharsDecimal);
+        ImGui::End();
+
         cv::Mat frame = tracker.getNextIRFrame();
         cv::Mat depth = tracker.getNextDepthFrame();
 
@@ -549,7 +687,7 @@ void ViewerWindow::Render() {
 
                     // Display the quaternion (XYZW)
                     ImGui::Text(" Quaternion: X: %.3f, Y: %.3f, Z: %.3f, W: %.3f",
-                                tool_transform[4], tool_transform[5], tool_transform[6], tool_transform[7]);
+                                tool_transform[3], tool_transform[4], tool_transform[5], tool_transform[6]);
 
                     ImGui::Separator(); // Separate the data for each tool
                 }

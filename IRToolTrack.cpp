@@ -1,6 +1,5 @@
 #include "IRToolTrack.h"
 #include "IRToolTracking.h"
-#include <Eigen/Eigen>
 #include <set>
 
 
