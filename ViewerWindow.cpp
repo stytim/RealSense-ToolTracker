@@ -176,14 +176,17 @@ Eigen::Matrix4f ViewerWindow::TrackingDataToMatrix(const TrackingData& data)
     return matrix;
 }
 
-bool ViewerWindow::Connect(const char *host, int port) {
-    if (nanosockets_initialize())
+bool ViewerWindow::Connect(NanoSocket& _socket, NanoAddress& address, const char *host, int port, bool& _connected) {
+    if (udpEnabled != multiEnabled)
     {
-        std::cerr<<"Error initializing socket library"<<std::endl;
-        return false;
+        if (nanosockets_initialize())
+        {
+            std::cerr << "Error initializing socket library" << std::endl;
+            return false;
+        }
     }
 
-    socket = nanosockets_create(0, 0);
+    _socket = nanosockets_create(0, 0);
     if (socket < 0)
     {
         std::cerr << "Failed to create a socket." << std::endl;
@@ -209,66 +212,64 @@ bool ViewerWindow::Connect(const char *host, int port) {
         }
     }
 
-    m_connected = true;
+    _connected = true;
     return true;
 }
 
-void ViewerWindow::Disconnect()
+void ViewerWindow::Disconnect(NanoSocket& _socket, bool& _connected)
 {
-    if (m_connected)
+    if (_connected)
     {
-        nanosockets_destroy(&socket);
-        nanosockets_deinitialize();
-        m_connected = false;
+        nanosockets_destroy(&_socket);
+        if (!multiEnabled && !udpEnabled)
+        {
+            nanosockets_deinitialize();
+        }
+        _connected = false;
     }
 }
 
 void ViewerWindow::UdpReceiveThreadFunction()
 {
-    if (nanosockets_initialize())
+    if (!Connect(receiveSocket, receiveAddress, "0.0.0.0", m_receiveport, m_receiveconnected))
     {
-        std::cerr << "Error initializing socket library" << std::endl;
+        std::cerr << "Failed to connect to server." << std::endl;
+        multiEnabled = false;
         return;
     }
 
-	receiveSocket = nanosockets_create(0, 0);
-    if (receiveSocket < 0)
-    {
-		std::cerr << "Failed to create a socket." << std::endl;
-		return;
-	}
-
-	NanoAddress receiveAddress = {};
 	receiveAddress.port = static_cast<uint16_t>(m_receiveport);
-
-    if (nanosockets_address_set_ip(&receiveAddress, "0.0.0.0"))
-    {
-		std::cerr << "Error setting default address" << std::endl;
-		return;
-	}
     
     if (nanosockets_bind(receiveSocket, &receiveAddress))
     {
 		std::cerr << "Failed to bind to port " << m_port << std::endl;
+        multiEnabled = false;
+        Disconnect(receiveSocket, m_receiveconnected);
 		return;
 	}
 
+    // Set the socket to non-blocking mode
+    if (nanosockets_set_nonblocking(receiveSocket, 1) != NANOSOCKETS_STATUS_OK) {
+        std::cerr << "Failed to set non-blocking mode" << std::endl;
+        Disconnect(receiveSocket, m_receiveconnected);
+        return;
+    }
+
+
     while (multiEnabled)
     {
+        NanoAddress sender;
 		std::vector<uint8_t> buffer(sizeof(TrackingData));
-        if (nanosockets_receive(receiveSocket, &receiveAddress, buffer.data(), buffer.size()) < 0)
-        {
-			std::cerr << "Failed to receive tracking data" << std::endl;
-		}
-        else
+        //toolTransforms.clear();
+        if (nanosockets_receive(receiveSocket, &sender, buffer.data(), buffer.size()) > 0)
         {
 			TrackingData data;
 			std::memcpy(&data, buffer.data(), sizeof(TrackingData));
-			std::cout << "Received tracking data for tool ID " << data.toolId << " from " << data.serialNumber <<std::endl;
-            // print received address
+			//std::cout << "Received tracking data for tool ID " << data.toolId << " from " << data.serialNumber <<std::endl;
+            //print received address
             //char ip[16];
-            //nanosockets_address_get_ip(&receiveAddress, ip, sizeof(ip));
-            //std::cout << "Received from " << ip << ":" << receiveAddress.port << std::endl;
+            //nanosockets_address_get_ip(&sender, ip, sizeof(ip));
+            //std::cout << "Received from " << ip << ":" << sender.port << std::endl;
 
             if (tracker.IsTrackingTools())
             {
@@ -276,42 +277,48 @@ void ViewerWindow::UdpReceiveThreadFunction()
                 {
                     if (data.toolId == id + 1)
                     {
-                        //check if the serial number is in the extrinsics map, if not, add it
-                        if (extrinsics.find(data.serialNumber) == extrinsics.end())
+                        // Always update extrinsics in case camera is moved
+                        std::vector<float> tool_transform = tracker.GetToolTransform(tools[id].toolName);
+                        if (!tool_transform.empty() && !std::isnan(tool_transform[0]) && tool_transform[7] != 0)
                         {
-                            std::vector<float> tool_transform = tracker.GetToolTransform(tools[id].toolName);
-                            if (!tool_transform.empty() && !std::isnan(tool_transform[0]) && tool_transform[7] != 0)
-                            {
-                                // tool_transform to matrix
-                                Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
-                                transform.block<3, 3>(0, 0) = Eigen::Quaternionf(tool_transform[6], tool_transform[3], tool_transform[4], tool_transform[5]).toRotationMatrix();
-                                transform.block<3, 1>(0, 3) = Eigen::Vector3f(tool_transform[0], tool_transform[1], tool_transform[2]);
+                            // tool_transform to matrix
+                            Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
+                            transform.block<3, 3>(0, 0) = Eigen::Quaternionf(tool_transform[6], tool_transform[3], tool_transform[4], tool_transform[5]).toRotationMatrix();
+                            transform.block<3, 1>(0, 3) = Eigen::Vector3f(tool_transform[0], tool_transform[1], tool_transform[2]);
 
-                                extrinsics[data.serialNumber] = transform * TrackingDataToMatrix(data).inverse();
-                            }
+                            extrinsics[data.serialNumber] =  transform * TrackingDataToMatrix(data).inverse();
                         }
 
-                        Eigen::Matrix4f extrinsic = extrinsics[data.serialNumber];
-                        Eigen::Matrix4f new_transform = TrackingDataToMatrix(data) * extrinsic;
+                        // check if serial number is in extrinsics
+                        if (extrinsics.find(data.serialNumber) == extrinsics.end())
+                        {
+							continue;
+						}
 
-                        //std::cout << extrinsic << std::endl;
-                        //std::cout << new_transform << std::endl;
+                        Eigen::Matrix4f extrinsic = extrinsics[data.serialNumber];
+                        Eigen::Matrix4f new_transform = extrinsic * TrackingDataToMatrix(data);
+
+                        {
+                            std::lock_guard<std::mutex> lock(secondaryDataMutex);
+                            toolTransforms[id] = new_transform;
+                        }
 					}
                 }
             }
 
 		}
 	}
-
-	nanosockets_destroy(&receiveSocket);
-	nanosockets_deinitialize();
+    multiEnabled = false;
+    std::cout << "Exiting UDP receive thread" << std::endl;
+    Disconnect(receiveSocket, m_receiveconnected);
 }
 
 void ViewerWindow::UdpThreadFunction()
 {
-    if (!Connect(ipAddress, m_port))
+    if (!Connect(socket, sendAddress, ipAddress, m_port, m_connected))
     { 
         std::cerr << "Failed to connect to server." << std::endl;
+        udpEnabled = false;
         return;
     }
 
@@ -323,7 +330,26 @@ void ViewerWindow::UdpThreadFunction()
             {
                 const auto &tool = tools[id];
                 std::vector<float> tool_transform = tracker.GetToolTransform(tool.toolName);
-                if (!tool_transform.empty() && !std::isnan(tool_transform[0]) && tool_transform[7] != 0)
+
+                bool validPrimaryData = !tool_transform.empty() && !std::isnan(tool_transform[0]) && tool_transform[7] != 0;
+
+                bool validSecondaryData = false;
+                if (!validPrimaryData && multiEnabled)
+                {
+                    std::lock_guard<std::mutex> lock(secondaryDataMutex);
+                    if (toolTransforms.find(id) != toolTransforms.end())
+                    {
+                        const Eigen::Matrix4f& secondaryData = toolTransforms[id];
+                        Eigen::Quaternionf q(secondaryData.block<3, 3>(0, 0));
+                        tool_transform = { secondaryData(0, 3), secondaryData(1, 3), secondaryData(2, 3),
+                                          q.x(), q.y(), q.z(), q.w() };
+
+                        toolTransforms.clear();
+                        validSecondaryData = true;
+                    }
+                }
+
+                if (validPrimaryData || validSecondaryData)
                 {
                     TrackingData data;
                     std::copy(tool_transform.begin(), tool_transform.begin() + 3, data.position); 
@@ -338,7 +364,7 @@ void ViewerWindow::UdpThreadFunction()
                         std::memcpy(buffer.data(), &data, sizeof(TrackingData));
 
                         // Send the serialized data
-                        if (nanosockets_send(socket, &address, buffer.data(), buffer.size()) < 0)
+                        if (nanosockets_send(socket, &sendAddress, buffer.data(), buffer.size()) < 0)
                         {
                             std::cerr << "Failed to send tracking data for tool ID " << data.toolId << std::endl;
                         }
@@ -351,7 +377,7 @@ void ViewerWindow::UdpThreadFunction()
         std::this_thread::sleep_for(std::chrono::milliseconds(sleepDurationMs));
     }
 
-    Disconnect();
+    Disconnect(socket, m_connected);
 }
 
 void ViewerWindow::GetSerialNumber()
@@ -675,10 +701,35 @@ void ViewerWindow::Render() {
             {
                 const auto &tool = tools[i];
                 std::vector<float> tool_transform = tracker.GetToolTransform(tool.toolName);
+                bool validPrimaryData = !tool_transform.empty() && !std::isnan(tool_transform[0]) && tool_transform[7] != 0;
+
+                bool validSecondaryData = false;
+                if (!validPrimaryData && multiEnabled)
+                {
+                    std::lock_guard<std::mutex> lock(secondaryDataMutex);
+                    if (toolTransforms.find(i) != toolTransforms.end())
+                    {
+                        const Eigen::Matrix4f& secondaryData = toolTransforms[i];
+                        Eigen::Quaternionf q(secondaryData.block<3, 3>(0, 0));
+                        tool_transform = { secondaryData(0, 3), secondaryData(1, 3), secondaryData(2, 3),
+                                          q.x(), q.y(), q.z(), q.w() };
+
+                        toolTransforms.clear();
+                        validSecondaryData = true;
+                    }
+                }
 
                 // Check if the tool transform is valid
-                if (!tool_transform.empty() && !std::isnan(tool_transform[0]) && tool_transform[7] != 0)
+                if (validPrimaryData || validSecondaryData)
                 {
+                    // Change text color based on the data source
+                    if (validPrimaryData) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                    }
+                    else {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.5f));
+                    }
+
                     ImGui::Text("Tool %zu: %s", i + 1, tool.toolName.c_str()); // Tool number and name
 
                     // Display the position (XYZ)
@@ -689,8 +740,10 @@ void ViewerWindow::Render() {
                     ImGui::Text(" Quaternion: X: %.3f, Y: %.3f, Z: %.3f, W: %.3f",
                                 tool_transform[3], tool_transform[4], tool_transform[5], tool_transform[6]);
 
+                    ImGui::PopStyleColor();
                     ImGui::Separator(); // Separate the data for each tool
                 }
+
             }
 
             ImGui::End();
@@ -719,9 +772,11 @@ void ViewerWindow::StopRender() {
 void ViewerWindow::Shutdown() {
     Terminated = true;
     udpEnabled = false;
+    multiEnabled = false;
     tracker.StopToolTracking();
     JoinThread(processingThread);
     JoinThread(udpThread);
+    JoinThread(udpReceiveThread);
     if (tracker.IsTrackingTools() || tracker.IsCalibratingTool())
         tracker.shutdown();
 }

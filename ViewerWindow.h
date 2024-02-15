@@ -39,8 +39,8 @@ private:
     void UdpThreadFunction();
     void UdpReceiveThreadFunction();
 
-    bool Connect(const char *host, int port);
-    void Disconnect();
+    bool Connect(NanoSocket& _socket, NanoAddress& address, const char* host, int port, bool& _connected);
+    void Disconnect(NanoSocket& _socket, bool& _connected);
 
     void GetSerialNumber();
     Eigen::Matrix4f TrackingDataToMatrix(const TrackingData &data);
@@ -60,6 +60,8 @@ private:
     GLFWwindow* window = nullptr;
     GLuint texture = 0, dtexture = 0;
     std::vector<Tool> tools;
+    std::map<int, Eigen::Matrix4f> toolTransforms;
+    std::mutex secondaryDataMutex;
 
     int numTools = 0; // Default number of tools
     int numSpheres = 4; // Default number of spheres
@@ -83,8 +85,10 @@ private:
 
     NanoSocket socket;
     NanoSocket receiveSocket;
-    NanoAddress address = {};
+    NanoAddress sendAddress = {};
+    NanoAddress receiveAddress = {};
     bool m_connected;
+    bool m_receiveconnected;
     char ipAddress[16] = "127.0.0.1"; 
     int m_port = 12345;
     int m_receiveport = 12345;
