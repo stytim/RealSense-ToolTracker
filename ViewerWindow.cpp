@@ -275,7 +275,7 @@ void ViewerWindow::UdpReceiveThreadFunction()
             {
                 for (size_t id = 0; id < tools.size(); ++id)
                 {
-                    if (data.toolId == id + 1)
+                    if (data.toolId == static_cast<int>(id + 1))
                     {
                         // Always update extrinsics in case camera is moved
                         std::vector<float> tool_transform = tracker.GetToolTransform(tools[id].toolName);
@@ -430,7 +430,7 @@ void ViewerWindow::Render() {
         ImGui::Begin("Device Selection", nullptr, overlayFlags);
         // Dropdown menu for devices
         if (ImGui::BeginCombo("Devices", currentDevice.c_str())) {
-            for (int i = 0; i < deviceList.size(); i++) {
+            for (int i = 0; i < static_cast<int>(deviceList.size()); i++) {
                 bool isSelected = (currentDevice == deviceList[i]);
                 if (ImGui::Selectable(deviceList[i].c_str(), isSelected)) {
                     currentDevice = deviceList[i];
@@ -472,7 +472,7 @@ void ViewerWindow::Render() {
 
         // Adjust the size of the tools vector based on numTools
         numTools = std::max(numTools, 1);
-        if (tools.size() != numTools)
+        if (static_cast<int>(tools.size()) != numTools)
         {
             tools.resize(numTools);
         }
@@ -579,11 +579,12 @@ void ViewerWindow::Render() {
 
         if (isToolAdded)
         {
-            ImGui::SetNextWindowPos(ImVec2(400, 80), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos(ImVec2(400, 100), ImGuiCond_FirstUseEver);
             ImGui::Begin("Tracking Control", nullptr, overlayFlags);
             if (!tracker.IsTrackingTools()) {
                 if (ImGui::Button("Start Tracking")) {
                     tracker.initialize(selectedDeviceIndex, 640 ,480);
+                    tracker.getLaserPower(laserPower, minlasPower, maxlasPower);
                     tracker.StartToolTracking();
                     processingThread = std::make_shared<std::thread>([this]() {
                     this->tracker.processStreams();
@@ -604,6 +605,10 @@ void ViewerWindow::Render() {
         // Add a slider for setting the IR threshold
         ImGui::SetNextWindowPos(ImVec2(400, 20), ImGuiCond_FirstUseEver);
         ImGui::Begin("IR Threshold Control", nullptr, overlayFlags);
+        if(ImGui::SliderInt("Laser Power", &laserPower, minlasPower, maxlasPower))
+        {
+            tracker.setLaserPower(laserPower);
+        }
         if(ImGui::SliderInt("IR Threshold", &irThreshold, 0, 255))
         {
             tracker.SetThreshold(irThreshold);

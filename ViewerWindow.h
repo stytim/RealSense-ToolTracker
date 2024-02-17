@@ -64,8 +64,6 @@ private:
     std::mutex secondaryDataMutex;
 
     int numTools = 0; // Default number of tools
-    int numSpheres = 4; // Default number of spheres
-    float sphereRadius = 6.5f; // Default sphere radius
     std::string toolName = "Tool1"; // Default tool name
     int toolId = 0; // Default tool id
     std::vector<float> spherePositions; 
@@ -75,6 +73,9 @@ private:
 
     IRToolTracking tracker;
     int irThreshold = 100;
+    int laserPower = 150;
+    int minlasPower = 0;
+    int maxlasPower = 360;
     int minPixelSize = 10;
     int maxPixelSize = 180;
     bool isToolAdded = false;

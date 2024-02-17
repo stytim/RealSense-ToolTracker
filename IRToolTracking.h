@@ -90,6 +90,9 @@ public:
     void SetMinMaxSize(int min, int max);
     void GetMinMaxSize(int &min, int &max);
 
+    void setLaserPower(int power);
+    void getLaserPower(int &power, int &min, int &max);
+
     std::vector<std::string>& getDeviceList() { return deviceNames; }
     bool DeprojectPixelToPoint(float(&uvd)[3], float(&xy)[2]);
     bool ProjectPointToPixel(float(&xyz)[3], float(&uv)[2]);

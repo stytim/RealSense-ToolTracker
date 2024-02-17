@@ -74,6 +74,50 @@ void IRToolTracking::StopToolCalibration()
     Terminated = true;
 }
 
+void IRToolTracking::setLaserPower(int power)
+{
+    if (dev) {
+        // Check if the device is a depth sensor and supports laser power control
+        auto depth_sensor = dev.first<rs2::depth_sensor>();
+        if (depth_sensor.supports(RS2_OPTION_LASER_POWER)) {
+            // Ensure the power level is within the allowable range
+            auto range = depth_sensor.get_option_range(RS2_OPTION_LASER_POWER);
+            power = std::min(std::max(power, static_cast<int>(range.min)), static_cast<int>(range.max));
+
+            // Set the laser power
+            depth_sensor.set_option(RS2_OPTION_LASER_POWER, static_cast<float>(power));
+            std::cout << "Laser power set to " << power << "." << std::endl;
+        } else {
+            std::cerr << "This RealSense device does not support changing laser power." << std::endl;
+        }
+    } else {
+        std::cerr << "RealSense device not initialized." << std::endl;
+    }
+}
+
+void IRToolTracking::getLaserPower(int &power, int &min, int &max)
+{
+    if (dev) {
+        // Check if the device is a depth sensor and supports laser power control
+        auto depth_sensor = dev.first<rs2::depth_sensor>();
+        if (depth_sensor.supports(RS2_OPTION_LASER_POWER)) {
+            // Get the current laser power
+            power = depth_sensor.get_option(RS2_OPTION_LASER_POWER);
+            auto range = depth_sensor.get_option_range(RS2_OPTION_LASER_POWER);
+            min = static_cast<int>(range.min);
+            max = static_cast<int>(range.max);
+            std::cout << "Current laser power: " << power << std::endl;
+            std::cout << "Laser power range: " << range.min << " - " << range.max << std::endl;
+
+        } else {
+            std::cerr << "This RealSense device does not support laser power option." << std::endl;
+        }
+        
+    } else {
+        std::cerr << "RealSense device not initialized." << std::endl;
+    }
+}
+
 void IRToolTracking::processStreams() {
 
     if (Terminated)
