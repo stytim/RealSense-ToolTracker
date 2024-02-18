@@ -186,7 +186,7 @@ bool ViewerWindow::Connect(NanoSocket& _socket, NanoAddress& address, const char
         }
     }
 
-    _socket = nanosockets_create(0, 0);
+    _socket = nanosockets_create(1024, 1024);
     if (socket < 0)
     {
         std::cerr << "Failed to create a socket." << std::endl;
@@ -577,7 +577,7 @@ void ViewerWindow::Render() {
             calibrationInitiated = false;
         }
 
-        if (isToolAdded)
+        if (isToolAdded && selectedDeviceIndex !=  -1)
         {
             ImGui::SetNextWindowPos(ImVec2(400, 100), ImGuiCond_FirstUseEver);
             ImGui::Begin("Tracking Control", nullptr, overlayFlags);
@@ -605,10 +605,15 @@ void ViewerWindow::Render() {
         // Add a slider for setting the IR threshold
         ImGui::SetNextWindowPos(ImVec2(400, 20), ImGuiCond_FirstUseEver);
         ImGui::Begin("IR Threshold Control", nullptr, overlayFlags);
-        if(ImGui::SliderInt("Laser Power", &laserPower, minlasPower, maxlasPower))
+        // if not on Mac
+        #if !defined(__APPLE__)
         {
-            tracker.setLaserPower(laserPower);
+            if(ImGui::SliderInt("Laser Power", &laserPower, minlasPower, maxlasPower))
+            {
+                tracker.setLaserPower(laserPower);
+            }
         }
+        #endif
         if(ImGui::SliderInt("IR Threshold", &irThreshold, 0, 255))
         {
             tracker.SetThreshold(irThreshold);

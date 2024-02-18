@@ -47,6 +47,7 @@ void IRToolTracking::initialize(int index, int width, int height) {
 
     frame_width = width;
     frame_height = height;
+    intrinsics_found = false;
     // Configure the RealSense pipeline
 
     config.enable_device(dev.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER));
@@ -132,8 +133,13 @@ void IRToolTracking::processStreams() {
     for (int i = 0; i < 50; i++) {
         pipeline.wait_for_frames();
     }
-
-    setLaserPower(300);
+    
+    // if not on Mac
+    #if !defined(__APPLE__)
+    {
+        setLaserPower(300);
+    }
+    #endif
 
     // Continuously capture frames and process them
     while (!Terminated) {
