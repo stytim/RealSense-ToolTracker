@@ -64,14 +64,14 @@ include_directories(${realsense2_INCLUDE_DIR})
 include_directories(${OpenCV_INCLUDE_DIRS})
 
 set(TRACKER_SOURCE_FILES
-    IRStructs.h
-    IRKalmanFilter.h
-    IRToolTrack.h
-    IRToolTracking.h
-    IRToolTrack.cpp
-    IRToolTracking.cpp 
+    include/IRStructs.h
+    include/IRKalmanFilter.h
+    include/IRToolTrack.h
+    include/IRToolTracking.h
+    src/IRToolTrack.cpp
+    src/IRToolTracking.cpp 
 )
-
+include_directories(include)
 # Add the IRToolTracking library
 add_library(IRToolTracking STATIC ${TRACKER_SOURCE_FILES})
 # Specify C++17 for IRToolTracking library
@@ -90,10 +90,10 @@ include_directories(
 )
 
 set(VIEWER_SOURCE_FILES
-    ROMParser.h
-    ViewerWindow.h
-    ViewerWindow.cpp
-    viewer_main.cpp
+    include/ROMParser.h
+    include/ViewerWindow.h
+    src/ViewerWindow.cpp
+    src/viewer_main.cpp
 )
 
 # Add the main application

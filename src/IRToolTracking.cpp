@@ -34,12 +34,13 @@ void IRToolTracking::initialize(int index, int width, int height) {
     if (model_name == "Intel RealSense D415") {
         irThreshold = 100;
         minSize = 10;
-        maxSize = 240;
+        maxSize = 300;
+        setLaserPower(300);
     }
     else if (model_name == "Intel RealSense D435") {
         irThreshold = 180;
         minSize = 10;
-        maxSize = 270;
+        maxSize = 370;
     }
     SetThreshold(irThreshold);
     SetMinMaxSize(minSize, maxSize);
@@ -86,7 +87,6 @@ void IRToolTracking::setLaserPower(int power)
 
             // Set the laser power
             depth_sensor.set_option(RS2_OPTION_LASER_POWER, static_cast<float>(power));
-            std::cout << "Laser power set to " << power << "." << std::endl;
         } else {
             std::cerr << "This RealSense device does not support changing laser power." << std::endl;
         }
@@ -106,9 +106,6 @@ void IRToolTracking::getLaserPower(int &power, int &min, int &max)
             auto range = depth_sensor.get_option_range(RS2_OPTION_LASER_POWER);
             min = static_cast<int>(range.min);
             max = static_cast<int>(range.max);
-            std::cout << "Current laser power: " << power << std::endl;
-            std::cout << "Laser power range: " << range.min << " - " << range.max << std::endl;
-
         } else {
             std::cerr << "This RealSense device does not support laser power option." << std::endl;
         }

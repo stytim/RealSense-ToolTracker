@@ -122,7 +122,7 @@ void ViewerWindow::Initialize() {
         //glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);            // 3.0+ only
     #endif
 
-    window = glfwCreateWindow( 1024, 720, "RealSense Tool Tracker", nullptr, nullptr );
+    window = glfwCreateWindow( 1060, 720, "RealSense Tool Tracker", nullptr, nullptr );
     if (window == nullptr)
     {
         std::cerr <<"glfwCreateWindow failed" << std::endl;
@@ -535,7 +535,7 @@ void ViewerWindow::Render() {
                     if (ImGui::Button(("Calibrate Tool##" + std::to_string(toolIdx)).c_str()))
                     {
                         std::cout << "Calibrating tool " << toolIdx + 1 << std::endl;
-                        tracker.initialize(selectedDeviceIndex, 640, 480);
+                        tracker.initialize(selectedDeviceIndex, 848, 480);
                         tracker.StartToolCalibration();
                         calibrationInitiated = true;
                         toolId = toolIdx;
@@ -583,9 +583,11 @@ void ViewerWindow::Render() {
             ImGui::Begin("Tracking Control", nullptr, overlayFlags);
             if (!tracker.IsTrackingTools()) {
                 if (ImGui::Button("Start Tracking")) {
-                    tracker.initialize(selectedDeviceIndex, 640 ,480);
+                    tracker.initialize(selectedDeviceIndex, 848 ,480);
                     tracker.getLaserPower(laserPower, minlasPower, maxlasPower);
                     tracker.StartToolTracking();
+                    irThreshold = tracker.GetThreshold();
+                    tracker.GetMinMaxSize(minPixelSize, maxPixelSize);
                     processingThread = std::make_shared<std::thread>([this]() {
                     this->tracker.processStreams();
                 });
@@ -600,8 +602,6 @@ void ViewerWindow::Render() {
             ImGui::End();
         }
 
-        irThreshold = tracker.GetThreshold();
-        tracker.GetMinMaxSize(minPixelSize, maxPixelSize);
         // Add a slider for setting the IR threshold
         ImGui::SetNextWindowPos(ImVec2(400, 20), ImGuiCond_FirstUseEver);
         ImGui::Begin("IR Threshold Control", nullptr, overlayFlags);
@@ -627,14 +627,15 @@ void ViewerWindow::Render() {
         ImGui::End();
 
         // Checkbox for enabling UDP
-        ImGui::SetNextWindowPos(ImVec2(720, 20), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(300, 0.0f));
+        ImGui::SetNextWindowPos(ImVec2(740, 20), ImGuiCond_FirstUseEver);
         ImGui::Begin("UDP Settings", nullptr, overlayFlags);
         ImGui::SetNextItemWidth(110);
         ImGui::InputText("IP Address", ipAddress, sizeof(ipAddress));
         ImGui::SameLine();
         ImGui::SetNextItemWidth(50); 
         ImGui::InputInt("Port", &m_port, 0, 0, ImGuiInputTextFlags_CharsDecimal);
-        ImGui::SetNextItemWidth(100);
+        ImGui::SetNextItemWidth(110);
         ImGui::InputInt("Frequency", &frequency);
         ImGui::SameLine();
         if (ImGui::Checkbox("UDP", &udpEnabled))
@@ -652,7 +653,8 @@ void ViewerWindow::Render() {
         ImGui::End();
         frequency = std::max(frequency, 1);
 
-        ImGui::SetNextWindowPos(ImVec2(720, 80), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(300, 0.0f));
+        ImGui::SetNextWindowPos(ImVec2(740, 80), ImGuiCond_FirstUseEver);
         ImGui::Begin("Multi-Camera Settings", nullptr, overlayFlags);
         if (ImGui::Checkbox("Multi-Camera", &multiEnabled))
         {
@@ -676,30 +678,33 @@ void ViewerWindow::Render() {
 
         if (!depth.empty() && (tracker.IsTrackingTools() || calibrationInitiated))
         {
-            ImGui::SetNextWindowPos(ImVec2(20, 450), ImGuiCond_FirstUseEver);
+            int windowWidth, windowHeight;
+            glfwGetWindowSize(window, &windowWidth, &windowHeight);
+
+            ImGui::SetNextWindowPos(ImVec2(20, windowHeight - 300));
             ImGui::Begin("IR Monitor", nullptr, overlayFlags);
             glBindTexture(GL_TEXTURE_2D, texture);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, frame.cols, frame.rows, 0, GL_RGB, GL_UNSIGNED_BYTE, frame.data);
-            ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(texture)), ImVec2(320, 240));
+            ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(texture)), ImVec2(424, 240));
             ImGui::End();
 
-            ImGui::SetNextWindowPos(ImVec2(420, 450), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos(ImVec2(480, windowHeight - 300));
             ImGui::Begin("Depth Monitor", nullptr, overlayFlags);
             glBindTexture(GL_TEXTURE_2D, dtexture);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, depth.cols, depth.rows, 0, GL_RGB, GL_UNSIGNED_BYTE, depth.data);
-            ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(dtexture)), ImVec2(320, 240));
+            ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(dtexture)), ImVec2(424, 240));
             ImGui::End();
         }
 
         if (tracker.IsTrackingTools())
         {
-            ImGui::SetNextWindowPos(ImVec2(400, 130), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos(ImVec2(400, 150), ImGuiCond_FirstUseEver);
             ImGui::Begin("Tool Ttacking Results", nullptr, overlayFlags);
 
             for (size_t i = 0; i < tools.size(); ++i)

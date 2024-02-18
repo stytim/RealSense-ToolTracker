@@ -73,11 +73,11 @@ private:
 
     IRToolTracking tracker;
     int irThreshold = 100;
-    int laserPower = 150;
+    int laserPower = 300;
     int minlasPower = 0;
     int maxlasPower = 360;
     int minPixelSize = 10;
-    int maxPixelSize = 180;
+    int maxPixelSize = 300;
     bool isToolAdded = false;
     bool calibrationInitiated = false;
 

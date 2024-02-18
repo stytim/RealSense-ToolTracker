@@ -120,7 +120,7 @@ private:
     int frame_height = 480;
     int irThreshold = 100;
     int minSize = 10;
-    int maxSize = 180;
+    int maxSize = 280;
 
     std::mutex mtx_frames;
     cv::Mat trackingFrame;
