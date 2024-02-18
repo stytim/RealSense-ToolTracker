@@ -30,12 +30,12 @@ void IRToolTracking::initialize(int index, int width, int height) {
     }
 
     dev = devices[index];
+    //dev.hardware_reset();
     std::string model_name = dev.get_info(RS2_CAMERA_INFO_NAME);
     if (model_name == "Intel RealSense D415") {
         irThreshold = 100;
         minSize = 10;
         maxSize = 300;
-        setLaserPower(300);
     }
     else if (model_name == "Intel RealSense D435") {
         irThreshold = 180;
@@ -81,6 +81,7 @@ void IRToolTracking::setLaserPower(int power)
         // Check if the device is a depth sensor and supports laser power control
         auto depth_sensor = dev.first<rs2::depth_sensor>();
         if (depth_sensor.supports(RS2_OPTION_LASER_POWER)) {
+            depth_sensor.set_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE, 1);
             // Ensure the power level is within the allowable range
             auto range = depth_sensor.get_option_range(RS2_OPTION_LASER_POWER);
             power = std::min(std::max(power, static_cast<int>(range.min)), static_cast<int>(range.max));
@@ -132,6 +133,8 @@ void IRToolTracking::processStreams() {
         pipeline.wait_for_frames();
     }
 
+    setLaserPower(300);
+
     // Continuously capture frames and process them
     while (!Terminated) {
         rs2::frameset frames = pipeline.wait_for_frames();
@@ -144,9 +147,11 @@ void IRToolTracking::processStreams() {
 
         // Colorize the depth frame
         rs2::frame colorized_depth = color_map.colorize(depth_frame);
-        cv::Mat colorized_depth_image(cv::Size(frame_width, frame_height), CV_8UC3, (void*)colorized_depth.get_data(), cv::Mat::AUTO_STEP);
-        std::lock_guard<std::mutex> lock(mtx_frames);
-        depthFrame = colorized_depth_image;
+        {
+            std::lock_guard<std::mutex> lock(mtx_frames);
+            depthFrame = cv::Mat(cv::Size(frame_width, frame_height), CV_8UC3,
+                (void*)colorized_depth.get_data(), cv::Mat::AUTO_STEP).clone();
+        }
 
         // Get intrinsic parameters of the depth sensor if not already retrieved
         if (!intrinsics_found)

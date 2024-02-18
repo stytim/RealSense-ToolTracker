@@ -555,9 +555,10 @@ void IRToolTracker::SetThreshold(int threshold)
 	m_Threshold = threshold;
 }
 
-cv::Mat IRToolTracker::GetProcessedFrame()
+const cv::Mat& IRToolTracker::GetProcessedFrame()
 {
-	return m_ProcessedFrame.clone();
+	std::lock_guard<std::mutex> lock(mtx_frames);
+	return m_ProcessedFrame;
 }
 
 void IRToolTracker::SetMinMaxSize(int min, int max)

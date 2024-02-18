@@ -584,10 +584,10 @@ void ViewerWindow::Render() {
             if (!tracker.IsTrackingTools()) {
                 if (ImGui::Button("Start Tracking")) {
                     tracker.initialize(selectedDeviceIndex, 848 ,480);
-                    tracker.getLaserPower(laserPower, minlasPower, maxlasPower);
                     tracker.StartToolTracking();
                     irThreshold = tracker.GetThreshold();
                     tracker.GetMinMaxSize(minPixelSize, maxPixelSize);
+                    tracker.getLaserPower(laserPower, minlasPower, maxlasPower);
                     processingThread = std::make_shared<std::thread>([this]() {
                     this->tracker.processStreams();
                 });

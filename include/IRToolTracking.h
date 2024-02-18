@@ -106,17 +106,17 @@ public:
 
     cv::Mat getNextDepthFrame() {
         std::lock_guard<std::mutex> lock(mtx_frames);
-        return depthFrame.clone();
+        return depthFrame;
     }
 
     cv::Mat getNextIRFrame() {
-        //std::lock_guard<std::mutex> lock(mtx_frames);
-        return trackingFrame.clone();
+        std::lock_guard<std::mutex> lock(mtx_frames);
+        return trackingFrame;
     }   
 
 private:
 
-    int frame_width = 640;
+    int frame_width = 848;
     int frame_height = 480;
     int irThreshold = 100;
     int minSize = 10;

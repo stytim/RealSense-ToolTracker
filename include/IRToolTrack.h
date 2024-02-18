@@ -43,7 +43,7 @@ public:
 	void SetThreshold(int threshold);
 	void SetMinMaxSize(int min, int max);
 
-	cv::Mat GetProcessedFrame();
+	const cv::Mat& GetProcessedFrame();
 
 
 	void StopTracking();
@@ -90,6 +90,7 @@ private:
 
 	double m_lTrackedTimestamp = 0;
 
+	std::mutex mtx_frames;
 	cv::Mat m_ProcessedFrame;
 
 	IRToolTracking* m_pRealSenseToolTracking;
