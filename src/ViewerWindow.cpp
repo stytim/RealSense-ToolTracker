@@ -91,8 +91,9 @@ bool ViewerWindow::LoadToolDefinition()
     return true;
 }
 
-void ViewerWindow::Initialize() {
+void ViewerWindow::Initialize(const std::string& file) {
 
+    recordedFile = file;
     const int init_result = glfwInit();
     if (init_result != GLFW_TRUE) {
         std::cerr <<"glfwInit failed" << std::endl;
@@ -160,10 +161,6 @@ void ViewerWindow::Initialize() {
 
     Terminated = false;
     Render(); 
-}
-
-void ViewerWindow::ProcessInput() {
-    // Process input
 }
 
 Eigen::Matrix4f ViewerWindow::TrackingDataToMatrix(const TrackingData& data)
@@ -407,7 +404,7 @@ void ViewerWindow::Render() {
 
     tracker.queryDevices();
     auto& deviceList = tracker.getDeviceList();
-    static int selectedDeviceIndex = deviceList.size() > 0 ? 0: -1;
+    static int selectedDeviceIndex = deviceList.size() > 0 || recordedFile != "" ? 0: -1;
     currentDevice = deviceList.size() > 0 ? deviceList[0] : "No Device Available";
     GetSerialNumber();
     float windowWidth = 350.0f;
@@ -535,7 +532,14 @@ void ViewerWindow::Render() {
                     if (ImGui::Button(("Calibrate Tool##" + std::to_string(toolIdx)).c_str()))
                     {
                         std::cout << "Calibrating tool " << toolIdx + 1 << std::endl;
-                        tracker.initialize(selectedDeviceIndex, 848, 480);
+                        if (recordedFile != "")
+                        {
+                            tracker.initializeFromFile(recordedFile);
+                        }
+                        else
+                        {
+                            tracker.initialize(selectedDeviceIndex, 848, 480);
+                        }
                         tracker.StartToolCalibration();
                         calibrationInitiated = true;
                         toolId = toolIdx;
@@ -583,11 +587,18 @@ void ViewerWindow::Render() {
             ImGui::Begin("Tracking Control", nullptr, overlayFlags);
             if (!tracker.IsTrackingTools()) {
                 if (ImGui::Button("Start Tracking")) {
-                    tracker.initialize(selectedDeviceIndex, 848 ,480);
+                    if (recordedFile != "")
+                    {
+                        tracker.initializeFromFile(recordedFile);
+                    }
+                    else
+                    {
+                        tracker.initialize(selectedDeviceIndex, 848, 480);
+                        tracker.getLaserPower(laserPower, minlasPower, maxlasPower);
+                    }
                     tracker.StartToolTracking();
                     irThreshold = tracker.GetThreshold();
-                    tracker.GetMinMaxSize(minPixelSize, maxPixelSize);
-                    tracker.getLaserPower(laserPower, minlasPower, maxlasPower);
+                    tracker.GetMinMaxSize(minPixelSize, maxPixelSize);  
                     processingThread = std::make_shared<std::thread>([this]() {
                     this->tracker.processStreams();
                 });

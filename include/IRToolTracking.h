@@ -70,6 +70,7 @@ public:
 
     void queryDevices();
     void initialize(int index, int width, int height);
+    void initializeFromFile(const std::string& file);
     void StartToolCalibration();
     void StopToolCalibration();
     void processStreams();

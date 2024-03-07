@@ -21,6 +21,24 @@ void IRToolTracking::queryDevices() {
 	}
 }
 
+void IRToolTracking::initializeFromFile(const std::string& file) {
+    // Get the width and height of the frames from the file
+    rs2::pipeline pipe(ctx);
+    rs2::config cfg;
+    cfg.enable_device_from_file(file);
+    pipe.start(cfg);
+    auto profile = pipe.get_active_profile();
+    auto depth_profile = profile.get_stream(RS2_STREAM_DEPTH).as<rs2::video_stream_profile>();
+    frame_width = depth_profile.width();
+    frame_height = depth_profile.height();
+    pipe.stop();
+
+    // Load the configuration from file
+    config.enable_device_from_file(file);
+    intrinsics_found = false;
+    Terminated = false;
+}
+
 void IRToolTracking::initialize(int index, int width, int height) {
 
     if (index < 0 || index >= devices.size()) {

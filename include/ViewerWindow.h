@@ -21,7 +21,7 @@ class ViewerWindow {
     };
 
 public:
-    void Initialize();
+    void Initialize(const std::string& file);
     void Shutdown();
 
     bool IsTerminated() const
@@ -30,7 +30,6 @@ public:
     }
 
 private:
-    void ProcessInput();
     void Render();
     void StopRender();
     void SaveToolDefinition(const Tool &tool);
@@ -70,6 +69,8 @@ private:
 
     std::string toolDefinitionFileName = "tool_definition.bin";
     static const int MAX_TOOL_NAME_LENGTH = 20;
+
+    std::string recordedFile = "";
 
     IRToolTracking tracker;
     int irThreshold = 100;
