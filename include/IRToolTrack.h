@@ -101,7 +101,7 @@ private:
 
 	float m_fCalibrationSphereRadius = 6.5f;
 	const int MAX_CALIBRATION_FRAMES = 100;
-	const int NUM_CALIBRATION_SPHERES = 4;
+	int NUM_CALIBRATION_SPHERES = 4;
 
 	std::vector<float> markerPositions;
 };

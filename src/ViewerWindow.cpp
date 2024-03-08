@@ -573,6 +573,7 @@ void ViewerWindow::Render() {
             std::vector<float> tool_definition = tracker.GetToolDefinition();
             if (!tool_definition.empty() && !std::isnan(tool_definition[0]) && tool_definition[0] != -1)
             {
+                tools[toolId].numSpheres = tool_definition.size() / 3;
                 tools[toolId].spherePositions = tool_definition;
             }
             tracker.StopToolCalibration();

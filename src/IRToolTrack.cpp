@@ -904,6 +904,10 @@ void IRToolTracker::CalibrateTool()
 
 	// Perform calibration, loop through processedFrames
 	std::vector<std::vector<Eigen::Vector3f>> markerPoints;
+
+	// Define the number of calibration spheres based on size of frame_spheres_xyz in the first frame
+	NUM_CALIBRATION_SPHERES = processedFrames[0].spheres_xyz_per_mm.at(m_fCalibrationSphereRadius).size().height;
+
 	markerPoints.resize(NUM_CALIBRATION_SPHERES);
 	for (ProcessedAHATFrame frame : processedFrames)
 	{
@@ -913,45 +917,62 @@ void IRToolTracker::CalibrateTool()
 		auto it_spheres_xyz = frame.spheres_xyz_per_mm.find(m_fCalibrationSphereRadius);
 		cv::Mat3f frame_spheres_xyz = it_spheres_xyz->second;
 
-		Side shortest = frame_ordered_sides.front();
+		//Side shortest = frame_ordered_sides.front();
     	Side longest = frame_ordered_sides.back();
 
-		if (std::isnan(longest.distance) || std::isnan(shortest.distance))
+		if (std::isnan(longest.distance))
 		{
 			continue; 
 		}
 
-		int marker1ID = -1;
-		int marker2ID = -1;
-		int marker3ID = -1;
-		int marker4ID = -1;
+		int tempMarker1ID = longest.id_from;
+		int tempMarker2ID = longest.id_to;
 
-		// Check if id_from or id_to of the longest side matches with any id of the shortest side
-		if (longest.id_from == shortest.id_from || longest.id_from == shortest.id_to)
+		Eigen::Vector3f tempMarker1 = cvVec3fToEigen(frame_spheres_xyz.at<cv::Vec3f>(tempMarker1ID));
+		Eigen::Vector3f tempMarker2 = cvVec3fToEigen(frame_spheres_xyz.at<cv::Vec3f>(tempMarker2ID));
+		Eigen::Vector3f lineVector = tempMarker2 - tempMarker1;
+
+		std::vector<std::pair<int, float>> distanceToLine;
+		for (int i = 0; i < NUM_CALIBRATION_SPHERES; ++i)
 		{
-			marker1ID = longest.id_from;
-			marker2ID = longest.id_to;
-			marker3ID = longest.id_from == shortest.id_from ? shortest.id_to : shortest.id_from;
-		}
-		else if (longest.id_to == shortest.id_from || longest.id_to == shortest.id_to)
-		{
-			marker1ID = longest.id_to;
-			marker2ID = longest.id_from;
-			marker3ID = longest.id_to == shortest.id_from ? shortest.id_to : shortest.id_from;
+			if (i != tempMarker1ID && i != tempMarker2ID)
+			{
+				Eigen::Vector3f marker = cvVec3fToEigen(frame_spheres_xyz.at<cv::Vec3f>(i));
+				Eigen::Vector3f tempMarkerToMarker = marker - tempMarker1;
+				float distance = (tempMarkerToMarker - tempMarkerToMarker.dot(lineVector) * lineVector / lineVector.squaredNorm()).norm();
+				distanceToLine.push_back(std::make_pair(i, distance));
+			}
 		}
 
-		std::set<int> remainingMarkers{0,1,2,3};
+		// Sorting the distances
+		std::sort(distanceToLine.begin(), distanceToLine.end(), [](const std::pair<int, float> &a, const std::pair<int, float> &b) {
+			return a.second < b.second;
+		});
 
-		// Remove Marker 1, 2, and 3 IDs
-		remainingMarkers.erase(marker1ID);
-		remainingMarkers.erase(marker2ID);
-		remainingMarkers.erase(marker3ID);
-		marker4ID = *remainingMarkers.begin();
+		int marker3ID = distanceToLine.front().first;
+		distanceToLine.erase(distanceToLine.begin());
+
+		// Determine marker1 and marker2
+		Eigen::Vector3f marker3 = cvVec3fToEigen(frame_spheres_xyz.at<cv::Vec3f>(marker3ID));
+		float distToTempMarker1 = (marker3 - tempMarker1).norm();
+		float distToTempMarker2 = (marker3 - tempMarker2).norm();
+
+		int marker1ID = distToTempMarker1 < distToTempMarker2 ? tempMarker1ID : tempMarker2ID;
+		int marker2ID = distToTempMarker1 < distToTempMarker2 ? tempMarker2ID : tempMarker1ID;
+
+		std::vector<int> remainingMarkerIDs;
+		for (auto& pair : distanceToLine) {
+			remainingMarkerIDs.push_back(pair.first);
+		}
+		
+		//int marker4ID = *remainingMarkerIDs.begin();
+
+		std::vector<int> allMarkerIDs = {marker1ID, marker2ID, marker3ID};
+		allMarkerIDs.insert(allMarkerIDs.end(), remainingMarkerIDs.begin(), remainingMarkerIDs.end());
 
 		// Convert cv::Vec3f to Eigen::Vector3f
 		Eigen::Vector3f marker1 = cvVec3fToEigen(frame_spheres_xyz.at<cv::Vec3f>(marker1ID));
 		Eigen::Vector3f marker2 = cvVec3fToEigen(frame_spheres_xyz.at<cv::Vec3f>(marker2ID));
-		Eigen::Vector3f marker3 = cvVec3fToEigen(frame_spheres_xyz.at<cv::Vec3f>(marker3ID));
 
 		// Define the tool coordinate system
 		Eigen::Vector3f x_axis = (marker2 - marker1).normalized();
@@ -974,25 +995,12 @@ void IRToolTracker::CalibrateTool()
 		transformation.block<3, 1>(0, 3) = translation;
 
 		// Transform the marker positions
-		// Marker 1
-		Eigen::Vector4f marker1_homogeneous(marker1[0], marker1[1], marker1[2], 1.0f);
-		Eigen::Vector4f marker1_tool = transformation * marker1_homogeneous;
-		markerPoints[0].push_back(marker1_tool.head<3>());
-
-		// Marker 2
-		Eigen::Vector4f marker2_homogeneous(marker2[0], marker2[1], marker2[2], 1.0f);
-		Eigen::Vector4f marker2_tool = transformation * marker2_homogeneous;
-		markerPoints[1].push_back(marker2_tool.head<3>());
-
-		// Marker 3
-		Eigen::Vector4f marker3_homogeneous(marker3[0], marker3[1], marker3[2], 1.0f);
-		Eigen::Vector4f marker3_tool = transformation * marker3_homogeneous;
-		markerPoints[2].push_back(marker3_tool.head<3>());
-
-		// Marker 4
-		Eigen::Vector4f marker4_homogeneous(frame_spheres_xyz.at<cv::Vec3f>(marker4ID)[0], frame_spheres_xyz.at<cv::Vec3f>(marker4ID)[1], frame_spheres_xyz.at<cv::Vec3f>(marker4ID)[2], 1.0f);
-		Eigen::Vector4f marker4_tool = transformation * marker4_homogeneous;
-		markerPoints[3].push_back(marker4_tool.head<3>());
+		for (int i = 0; i < allMarkerIDs.size(); ++i) {
+			Eigen::Vector3f marker = cvVec3fToEigen(frame_spheres_xyz.at<cv::Vec3f>(allMarkerIDs[i]));
+			Eigen::Vector4f marker_homogeneous(marker[0], marker[1], marker[2], 1.0f);
+			Eigen::Vector4f marker_tool = transformation * marker_homogeneous;
+			markerPoints[i].push_back(marker_tool.head<3>());
+		}
 	}
 
 	processedFrames.clear();
