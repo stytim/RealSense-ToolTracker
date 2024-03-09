@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <regex>
+#include <iomanip>
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
@@ -20,6 +21,12 @@
 
 
 namespace fs = std::filesystem;
+
+double GetCurrentUnixTimestamp() {
+    auto now = std::chrono::system_clock::now();
+    auto duration = now.time_since_epoch();
+    return std::chrono::duration<double>(duration).count();
+}
 
 void ViewerWindow::SaveToolDefinition(const Tool &tool)
 {
@@ -360,7 +367,7 @@ void ViewerWindow::UdpThreadFunction()
                     std::copy(tool_transform.begin(), tool_transform.begin() + 3, data.position); 
                     std::copy(tool_transform.begin() + 3, tool_transform.end(), data.quaternion); 
                     data.toolId = static_cast<int>(id) + 1;                                        
-                    data.timestamp = glfwGetTime();
+                    data.timestamp = GetCurrentUnixTimestamp();
                     data.serialNumber = serialNumber;
 
                     if (m_connected) {
@@ -383,6 +390,82 @@ void ViewerWindow::UdpThreadFunction()
     }
 
     Disconnect(socket, m_connected);
+}
+
+void ViewerWindow::WriteToCSV()
+{
+    // Check if csvFileName exists, if so, add a number to the end of the filename
+    fs::path basePath(csvFileName);
+    std::string stem = basePath.stem().string();
+    std::string extension = basePath.extension().string();
+    int count = 1;
+
+    fs::path newFilePath = basePath;
+    while (fs::exists(newFilePath)) {
+        newFilePath = basePath.parent_path() / (stem + std::to_string(count) + extension);
+        count++;
+    }
+    std::cout << "Saving to " << newFilePath << std::endl;
+
+	std::ofstream file(newFilePath);
+    if (!file)
+    {
+		std::cerr << "Failed to open csv" << std::endl;
+		return;
+	}
+
+	file << "Serial Number,Tool ID,Timestamp,Position X,Position Y,Position Z,Quaternion X,Quaternion Y,Quaternion Z,Quaternion W\n";
+
+    std::chrono::steady_clock::time_point start;
+    bool timerStarted = false;
+
+    while (csvEnabled)
+    {
+        if (tracker.IsTrackingTools())
+        {
+            if (!timerStarted)
+            {
+                start = std::chrono::steady_clock::now(); // Start the timer
+                timerStarted = true;
+            }
+            else
+            {
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start);
+
+                if (elapsed.count() >= duration) // Check if duration has been exceeded
+                {
+                    break; // Exit loop
+                }
+            }
+            for (size_t id = 0; id < tools.size(); ++id)
+            {
+                const auto& tool = tools[id];
+                std::vector<float> tool_transform = tracker.GetToolTransform(tool.toolName);
+                if (!tool_transform.empty() && !std::isnan(tool_transform[0]) && tool_transform[7] != 0)
+                {
+                    double unixTimestamp = GetCurrentUnixTimestamp();
+                    file << std::fixed << std::setprecision(6) << serialNumber << "," << id + 1 << "," << unixTimestamp << ",";
+                    for (size_t i = 0; i < tool_transform.size() - 1; ++i)
+                    {
+                        file << tool_transform[i];
+                        if (i < tool_transform.size() - 2)
+                        {
+                            file << ",";
+                        }
+                    }
+                    file << "\n";
+                }
+            }
+        }
+
+        int sleepDurationMs = 1000 / recordFrequency; 
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleepDurationMs));
+	}
+
+	file.close();
+    csvEnabled = false;
+    finishedRecord = true;
 }
 
 void ViewerWindow::GetSerialNumber()
@@ -671,7 +754,6 @@ void ViewerWindow::Render() {
             }
             else
             {
-                udpEnabled = false;
                 JoinThread(udpThread);
             }
         }
@@ -689,7 +771,6 @@ void ViewerWindow::Render() {
             }
             else
             {
-                multiEnabled = false;
                 JoinThread(udpReceiveThread);
             }
         }
@@ -697,6 +778,50 @@ void ViewerWindow::Render() {
         ImGui::SetNextItemWidth(50);
         ImGui::InputInt("Receive Port", &m_receiveport, 0, 0, ImGuiInputTextFlags_CharsDecimal);
         ImGui::End();
+
+        // GUI for CSV recording
+        ImGui::SetNextWindowSize(ImVec2(300, 0.0f));
+        ImGui::SetNextWindowPos(ImVec2(740, 120), ImGuiCond_FirstUseEver);
+        ImGui::Begin("CSV Recording", nullptr, overlayFlags);
+        ImGui::SetNextItemWidth(70);
+        ImGui::InputInt("Frequency", &recordFrequency);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(80);
+        ImGui::InputInt("Duration", &duration);
+        ImGui::SetNextItemWidth(110);
+        if (ImGui::Button("Save To"))
+        {
+            NFD_Init();
+            nfdchar_t* path = nullptr;
+            nfdfilteritem_t filterItem[1] = { { "CSV file", "csv" } };
+            nfdresult_t result = NFD_SaveDialog(&path, filterItem, 1, NULL, NULL);
+            if (result == NFD_OKAY && path) {
+                csvFileName = path;
+                NFD_FreePath(path);
+            }
+            NFD_Quit();
+        }
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Record", &csvEnabled))
+        {
+            if (csvEnabled)
+            {
+				csvThread = std::make_shared<std::thread>(&ViewerWindow::WriteToCSV, this);
+			}
+            else
+            {
+				JoinThread(csvThread);
+			}
+		}
+        ImGui::End();
+        recordFrequency = std::min(std::max(recordFrequency, 1), 90);
+        duration = std::max(duration, 1);
+
+        if (finishedRecord)
+        {
+            JoinThread(csvThread);
+            finishedRecord = false;
+        }
 
         cv::Mat frame = tracker.getNextIRFrame();
         cv::Mat depth = tracker.getNextDepthFrame();
@@ -729,7 +854,7 @@ void ViewerWindow::Render() {
 
         if (tracker.IsTrackingTools())
         {
-            ImGui::SetNextWindowPos(ImVec2(400, 150), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos(ImVec2(400, 200), ImGuiCond_FirstUseEver);
             ImGui::Begin("Tool Ttacking Results", nullptr, overlayFlags);
 
             for (size_t i = 0; i < tools.size(); ++i)
@@ -812,6 +937,7 @@ void ViewerWindow::Shutdown() {
     JoinThread(processingThread);
     JoinThread(udpThread);
     JoinThread(udpReceiveThread);
+    JoinThread(csvThread);
     if (tracker.IsTrackingTools() || tracker.IsCalibratingTool())
         tracker.shutdown();
 }

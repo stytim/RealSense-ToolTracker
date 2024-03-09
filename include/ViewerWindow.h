@@ -38,6 +38,8 @@ private:
     void UdpThreadFunction();
     void UdpReceiveThreadFunction();
 
+    void WriteToCSV();
+
     bool Connect(NanoSocket& _socket, NanoAddress& address, const char* host, int port, bool& _connected);
     void Disconnect(NanoSocket& _socket, bool& _connected);
 
@@ -54,6 +56,10 @@ private:
 
     std::shared_ptr<std::thread> udpReceiveThread;
     bool multiEnabled = false;
+
+    std::shared_ptr<std::thread> csvThread;
+    bool csvEnabled = false;
+
     std::map<long long, Eigen::Matrix4f> extrinsics;
 
     GLFWwindow* window = nullptr;
@@ -95,6 +101,10 @@ private:
     int m_port = 12345;
     int m_receiveport = 12345;
     int frequency = 100;
+    int recordFrequency = 10;
+    int duration = 20;
+    std::string csvFileName = "tracking_data.csv";
+    bool finishedRecord = false;
 };
 
 #endif // VIEWER_WINDOW_H
