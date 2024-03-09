@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.21)
 project(ir-tracking)
 
 # Set C++17 as the standard globally
@@ -85,8 +85,7 @@ target_link_libraries(IRToolTracking PUBLIC Eigen3 ${realsense2_LIBRARY} opencv_
 
 
 
-set(MACOS_ICON "resources/app_icon.icns")
-set(WINDOWS_ICON "resources/app_icon.ico")
+#set(MACOS_ICON "resources/app_icon.icns")
 
 
 find_package(OpenGL REQUIRED)
@@ -96,7 +95,7 @@ include_directories(
 )
 
 set(VIEWER_SOURCE_FILES
-    ${MACOS_ICON}
+    #${MACOS_ICON}
     win.rc
     include/ROMParser.h
     include/ViewerWindow.h
@@ -107,14 +106,14 @@ set(VIEWER_SOURCE_FILES
 # Add the main application
 add_executable(ir-tracking-app  ${VIEWER_SOURCE_FILES})
 
-if(APPLE)
-    set_target_properties(ir-tracking-app PROPERTIES
-                            MACOSX_BUNDLE TRUE
-                            MACOSX_BUNDLE_ICON_FILE app_icon.icns
-                            RESOURCE "${MACOS_ICON}"
-                            )
-    set_source_files_properties(${MACOS_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
-endif()
+# if(APPLE)
+#     set_target_properties(ir-tracking-app PROPERTIES
+#                             MACOSX_BUNDLE TRUE
+#                             MACOSX_BUNDLE_ICON_FILE app_icon.icns
+#                             RESOURCE "${MACOS_ICON}"
+#                             )
+#     set_source_files_properties(${MACOS_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+# endif()
 
 include_directories( ${IMGUI_DIR} )
 include_directories( ${IMGUI_DIR}/backends)
@@ -130,7 +129,8 @@ target_link_libraries(ir-tracking-app PRIVATE
                         imgui::imgui
                         ${OPENGL_LIBRARIES} 
                         nanosockets
-                        nfd)
+                        nfd
+                        json)
 
 
 

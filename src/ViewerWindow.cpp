@@ -9,6 +9,7 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <nfd.h> 
+#include <nlohmann/json.hpp>
 
 #include "ViewerWindow.h"
 #include "ROMParser.h"
@@ -16,6 +17,7 @@
 #include "AppIcon.inc"
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+
 
 namespace fs = std::filesystem;
 
@@ -28,15 +30,18 @@ void ViewerWindow::SaveToolDefinition(const Tool &tool)
     }
 
     // Construct the filename using the tool name
-    fs::path filePath = toolsDir / (tool.toolName + ".bin");
+    fs::path filePath = toolsDir / (tool.toolName + ".json");
 
-    std::ofstream file(filePath, std::ios::out | std::ios::binary);
+    nlohmann::json toolJson;
+    toolJson["numSpheres"] = tool.numSpheres;
+    toolJson["spherePositions"] = tool.spherePositions;
+    toolJson["sphereRadius"] = tool.sphereRadius;
+    toolJson["toolName"] = tool.toolName;
+
+    std::ofstream file(filePath);
     if (file)
     {
-        file.write(reinterpret_cast<const char *>(&tool.numSpheres), sizeof(tool.numSpheres));
-        file.write(reinterpret_cast<const char *>(tool.spherePositions.data()), tool.spherePositions.size() * sizeof(float));
-        file.write(reinterpret_cast<const char *>(&tool.sphereRadius), sizeof(tool.sphereRadius));
-        file << tool.toolName << '\n'; // Writing tool name at the end of the file
+        file << toolJson.dump(4); // Save the JSON with indentation for readability
     }
     else
     {
@@ -56,25 +61,28 @@ bool ViewerWindow::LoadToolDefinition()
     tools.clear(); // Clear existing tools
     for (const auto &entry : fs::directory_iterator(toolDir))
     {
-        if (entry.path().extension() == ".bin")
+        if (entry.path().extension() == ".json")
         {
-            std::ifstream file(entry.path(), std::ios::in | std::ios::binary);
+            std::ifstream file(entry.path());
             if (!file)
             {
                 std::cerr << "Failed to open " << entry.path() << std::endl;
-                continue; // Skip to the next file
+                continue;
             }
 
+            nlohmann::json toolJson;
+            file >> toolJson;
+
             Tool tool;
-            file.read(reinterpret_cast<char *>(&tool.numSpheres), sizeof(tool.numSpheres));
-            tool.spherePositions.resize(tool.numSpheres * 3);
-            file.read(reinterpret_cast<char *>(tool.spherePositions.data()), tool.spherePositions.size() * sizeof(float));
-            file.read(reinterpret_cast<char *>(&tool.sphereRadius), sizeof(tool.sphereRadius));
-            std::getline(file, tool.toolName);
+            tool.numSpheres = toolJson["numSpheres"].get<int>();
+            tool.spherePositions = toolJson["spherePositions"].get<std::vector<float>>();
+            tool.sphereRadius = toolJson["sphereRadius"].get<float>();
+            tool.toolName = toolJson["toolName"].get<std::string>();
+
             if (!file)
             {
                 std::cerr << "Failed to read data from " << entry.path() << std::endl;
-                continue; // Skip to the next file
+                continue;
             }
             std::cout << "Loaded tool definition: " << tool.toolName << std::endl;
             tools.push_back(std::move(tool));

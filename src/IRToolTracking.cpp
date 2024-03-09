@@ -37,6 +37,7 @@ void IRToolTracking::initializeFromFile(const std::string& file) {
     config.enable_device_from_file(file);
     intrinsics_found = false;
     Terminated = false;
+    playFromFile = true;
 }
 
 void IRToolTracking::initialize(int index, int width, int height) {
@@ -198,7 +199,7 @@ void IRToolTracking::processStreams() {
             // Create a 4x4 identity matrix
             cv::Mat pose = cv::Mat::eye(4, 4, CV_32F);
             m_IRToolTracker->AddFrame(left_frame_image.data, depth_frame_image.data, left_frame_image.cols, left_frame_image.rows, pose ,timestamp);
-            m_latestTrackedFrame = timestamp;
+            m_latestTrackedFrame = playFromFile ? -1 : timestamp;
         }
         
         trackingFrame = m_IRToolTracker->GetProcessedFrame();

@@ -5,4 +5,5 @@ add_subdirectory(glfw)
 add_subdirectory(imgui)
 add_subdirectory(nanosockets)
 add_subdirectory(nfd)
+add_subdirectory(json)
 

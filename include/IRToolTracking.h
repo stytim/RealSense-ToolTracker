@@ -131,7 +131,8 @@ private:
     std::shared_ptr<std::thread> Thread;
 
     std::shared_ptr<IRToolTracker> m_IRToolTracker = nullptr;
-    double m_latestTrackedFrame = 0;
+    double m_latestTrackedFrame = -1;
+    bool playFromFile = false;
 
     bool intrinsics_found = false;
 
