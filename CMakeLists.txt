@@ -83,6 +83,12 @@ target_link_libraries(IRToolTracking PUBLIC Eigen3 ${realsense2_LIBRARY} opencv_
 ################################################################################
 # Dependencies for the main application
 
+
+
+set(MACOS_ICON "resources/app_icon.icns")
+set(WINDOWS_ICON "resources/app_icon.ico")
+
+
 find_package(OpenGL REQUIRED)
 include_directories(
     .
@@ -90,6 +96,8 @@ include_directories(
 )
 
 set(VIEWER_SOURCE_FILES
+    ${MACOS_ICON}
+    win.rc
     include/ROMParser.h
     include/ViewerWindow.h
     src/ViewerWindow.cpp
@@ -98,6 +106,15 @@ set(VIEWER_SOURCE_FILES
 
 # Add the main application
 add_executable(ir-tracking-app  ${VIEWER_SOURCE_FILES})
+
+if(APPLE)
+    set_target_properties(ir-tracking-app PROPERTIES
+                            MACOSX_BUNDLE TRUE
+                            MACOSX_BUNDLE_ICON_FILE app_icon.icns
+                            RESOURCE "${MACOS_ICON}"
+                            )
+    set_source_files_properties(${MACOS_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+endif()
 
 include_directories( ${IMGUI_DIR} )
 include_directories( ${IMGUI_DIR}/backends)
