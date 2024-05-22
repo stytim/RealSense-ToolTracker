@@ -117,15 +117,12 @@ Contributions are welcome! When submitting a pull request, please include a desc
 ## Frequently Asked Questions (FAQs)
 ### Can I use Azure Kinect Cameras for this project?
 
-Currently, Azure Kinect Cameras are not supported due to an issue with marker overexposure, which affects the retrieval of valid depth values. For more insights, please refer to the discussion on [Azure-Kinect-Sensor-SDK Issue #1349](https://github.com/microsoft/Azure-Kinect-Sensor-SDK/issues/1349)
+Currently, Azure Kinect Cameras have an issue with marker overexposure, which affects the retrieval of valid depth values. For more insights, please refer to the discussion on [Azure-Kinect-Sensor-SDK Issue #1349](https://github.com/microsoft/Azure-Kinect-Sensor-SDK/issues/1349). 
+However, I have a hack regarding this issue. To put it simply, I sampled the pixels around the overexposed areas and used them to estimate the depth of the marker. Please refer to the [AzureKinect Tool Tracker](https://github.com/stytim/AzureKinect-ToolTracker)
 
 ### I'm encountering issues while installing the Intel RealSense SDK on MacOS. What should I do?
 
 Installation issues on MacOS can be tricky due to Intel dropping support for newer MacOS and Mac with Apple silicon. I recommend this comprehensive guide on [setting up Intel RealSense on MacOS](https://lightbuzz.com/realsense-macos/). 
-
-### What are the future plans for this project?
-
-My next big goal is to implement support for a multi-camera setup, enabling marker tracking over larger areas. However, as this project is a part-time endeavor, progress might be gradual. Stay tuned for updates!
 
 
 ## License and Citation
