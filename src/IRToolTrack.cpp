@@ -16,8 +16,14 @@ IRToolTracker::~IRToolTracker()
 }
 
 
-#define DISABLE_LOWPASS FALSE
-#define DISABLE_KALMAN FALSE
+// Compile-time toggles for the smoothing filters. Override with -D… if you
+// want to disable a filter without editing the source.
+#ifndef DISABLE_LOWPASS
+#define DISABLE_LOWPASS 0
+#endif
+#ifndef DISABLE_KALMAN
+#define DISABLE_KALMAN 0
+#endif
 
 
 
@@ -73,10 +79,8 @@ void IRToolTracker::TrackTools()
 
 void IRToolTracker::TrackTool(IRTrackedTool &tool, const ProcessedAHATFrame &frame, ToolResultContainer &result)
 {
-	tool.tracking_finished = false;
 	if (frame.num_spheres < tool.min_visible_spheres) {
 		//Not enough spheres for the tool are available
-		tool.tracking_finished = true;
 		return;
 	}
 	std::vector<Side> eligible_sides;
@@ -118,7 +122,6 @@ void IRToolTracker::TrackTool(IRTrackedTool &tool, const ProcessedAHATFrame &fra
 			}
 			if (eligible_sides.size() == 0 && max_occluded_spheres == 0)
 			{
-				tool.tracking_finished = true;
 				return;
 			}
 			if (eligible_sides.size() != 0)
@@ -132,7 +135,6 @@ void IRToolTracker::TrackTool(IRTrackedTool &tool, const ProcessedAHATFrame &fra
 		}
 		if (eligible_sides.size() == 0 && max_occluded_spheres == 0)
 		{
-			tool.tracking_finished = true;
 			return;
 		}
 			
@@ -228,8 +230,6 @@ void IRToolTracker::TrackTool(IRTrackedTool &tool, const ProcessedAHATFrame &fra
 			search_list.push_back(search_entry{ searched_ids_new, curr.combined_error + error_new, curr.num_sides + error_counter, curr.occluded_nodes_tool});
 		}
 	}
-	tool.tracking_finished = true;
-	return;
 }
 
 
@@ -340,7 +340,7 @@ cv::Mat IRToolTracker::MatchPointsKabsch(IRTrackedTool &tool, const ProcessedAHA
 		cv::Vec3f sphere_world = cv::Vec3f(sphere_world_mat.at<float>(0, 0), sphere_world_mat.at<float>(1, 0), sphere_world_mat.at<float>(2, 0));
 
 		//Filter the resulting world position
-#if !DEBUG_NO_FILTER && !DISABLE_KALMAN
+#if !DISABLE_KALMAN
 		sphere_world = tool.sphere_kalman_filters.at(tool_node_id).FilterData(sphere_world);
 #endif
 		tool_node_id++;
@@ -410,8 +410,6 @@ cv::Mat IRToolTracker::MatchPointsKabsch(IRTrackedTool &tool, const ProcessedAHA
 	transform_matrix.at<float>(2, 3) = t.at<float>(2, 0) / 1000.f;
 	transform_matrix.at<float>(3, 3) = 1.f;
 
-	// transform_matrix = FlipTransformRightLeft(transform_matrix);
-
 	//Copy translation and convert mm to m
 	cv::Vec3f position;
 	position[0] = transform_matrix.at<float>(0, 3);
@@ -431,7 +429,7 @@ cv::Mat IRToolTracker::MatchPointsKabsch(IRTrackedTool &tool, const ProcessedAHA
 
 	Eigen::Quaternionf rotation(quat[3], quat[0], quat[1], quat[2]);
 
-#if !DISABLE_LOWPASS && !DEBUG_NO_FILTER
+#if !DISABLE_LOWPASS
 	{
 		Eigen::Quaternionf rotation_old(tool.cur_transform.at<float>(6, 0), tool.cur_transform.at<float>(3, 0), tool.cur_transform.at<float>(4, 0), tool.cur_transform.at<float>(5, 0));
     	rotation = rotation_old.slerp(tool.lowpass_factor_rotation, rotation);
@@ -458,19 +456,6 @@ cv::Mat IRToolTracker::MatchPointsKabsch(IRTrackedTool &tool, const ProcessedAHA
 	return position_rotation;
 
 
-}
-
-cv::Mat IRToolTracker::FlipTransformRightLeft(cv::Mat transform_rhs)
-{
-	//Bring to unity coordinate system
-	cv::Mat flipz = cv::Mat::ones(4, 4, CV_32F);
-	flipz.at<float>(2, 0) = -1.f;
-	flipz.at<float>(0, 2) = -1.f;
-	flipz.at<float>(2, 1) = -1.f;
-	flipz.at<float>(1, 2) = -1.f;
-	flipz.at<float>(2, 3) = -1.f;
-	cv::Mat transform_lhs = transform_rhs.mul(flipz);
-	return transform_lhs;
 }
 
 void IRToolTracker::ConstructMap(cv::Mat3f spheres_xyz, int num_spheres, cv::Mat& map, std::vector<Side>& ordered_sides)

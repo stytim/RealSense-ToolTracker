@@ -69,8 +69,6 @@ private:
 
 	cv::Mat MatchPointsKabsch(IRTrackedTool &tool, const ProcessedAHATFrame &frame, const std::vector<int> &sphere_ids, const std::vector<int> &occluded_nodes);
 
-	cv::Mat FlipTransformRightLeft(cv::Mat hololens_transform);
-
 	void ConstructMap(cv::Mat3f spheres_xyz, int num_spheres, cv::Mat& result_map, std::vector<Side>& result_ordered_sides);
 
 

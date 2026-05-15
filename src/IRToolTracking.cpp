@@ -1,6 +1,7 @@
 #include "IRToolTracking.h"
 #include <iostream>
 #include <algorithm>
+#include <cmath>
 #include <librealsense2/rsutil.h>
 
 IRToolTracking::IRToolTracking() {
@@ -104,7 +105,9 @@ void IRToolTracking::setLaserPower(int power)
             depth_sensor.set_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE, 1);
             // Ensure the power level is within the allowable range
             auto range = depth_sensor.get_option_range(RS2_OPTION_LASER_POWER);
-            power = std::min(std::max(power, static_cast<int>(range.min)), static_cast<int>(range.max));
+            const int range_min = static_cast<int>(std::lround(range.min));
+            const int range_max = static_cast<int>(std::lround(range.max));
+            power = std::min(std::max(power, range_min), range_max);
 
             // Set the laser power
             depth_sensor.set_option(RS2_OPTION_LASER_POWER, static_cast<float>(power));
@@ -122,11 +125,12 @@ void IRToolTracking::getLaserPower(int &power, int &min, int &max)
         // Check if the device is a depth sensor and supports laser power control
         auto depth_sensor = dev.first<rs2::depth_sensor>();
         if (depth_sensor.supports(RS2_OPTION_LASER_POWER)) {
-            // Get the current laser power
-            power = depth_sensor.get_option(RS2_OPTION_LASER_POWER);
+            // Get the current laser power. RealSense returns a float in mW; the UI
+            // operates on int sliders, so round to the nearest int.
+            power = static_cast<int>(std::lround(depth_sensor.get_option(RS2_OPTION_LASER_POWER)));
             auto range = depth_sensor.get_option_range(RS2_OPTION_LASER_POWER);
-            min = static_cast<int>(range.min);
-            max = static_cast<int>(range.max);
+            min = static_cast<int>(std::lround(range.min));
+            max = static_cast<int>(std::lround(range.max));
         } else {
             std::cerr << "This RealSense device does not support laser power option." << std::endl;
         }
@@ -140,13 +144,14 @@ void IRToolTracking::processStreams() {
 
     if (Terminated)
         return;
-    // Start the pipeline
+    // Start the pipeline. If it fails, log and bail out so the GUI thread
+    // can join us cleanly instead of having the whole process killed.
     try {
         profile = pipeline.start(config);
     } catch (const rs2::error &e) {
-        std::cerr << "Error occurred during RealSense pipeline start." << std::endl;
-        std::cerr << e.what() << std::endl;
-        exit(EXIT_FAILURE);
+        std::cerr << "Error during RealSense pipeline start: " << e.what() << std::endl;
+        Terminated = true;
+        return;
     }
     // Warm up the device
     for (int i = 0; i < 50; i++) {
@@ -188,7 +193,6 @@ void IRToolTracking::processStreams() {
 
         // Get the timestamp of the current frame
         double timestamp = ir_frame_left.get_timestamp();
-        long long frame_number = ir_frame_left.get_frame_number();
 
         // Convert RealSense frame to OpenCV matrix
         cv::Mat left_frame_image(cv::Size(frame_width, frame_height), CV_8UC1, (void*)ir_frame_left.get_data(), cv::Mat::AUTO_STEP);

@@ -9,8 +9,6 @@
 #include <opencv2/imgcodecs/imgcodecs.hpp>
 
 #include <mutex>
-#include <queue>
-#include <condition_variable>
 #include <iostream>
 
 #include "IRToolTrack.h"
@@ -28,40 +26,6 @@ inline void JoinThread(std::shared_ptr<std::thread>& th)
         th = nullptr;
     }
 }
-
-
-
-class FrameQueue {
-private:
-    std::queue<cv::Mat> queue;
-    std::mutex mutex;
-    std::condition_variable cond;
-
-public:
-    cv::Mat lastframe;
-    void push(cv::Mat frame) {
-        std::lock_guard<std::mutex> lock(mutex);
-        queue.push(frame);
-        cond.notify_one();
-    }
-
-    cv::Mat pop() {
-        std::unique_lock<std::mutex> lock(mutex);
-        cond.wait(lock, [this]{ return !queue.empty(); });
-        while (queue.size() > 1) {
-            queue.pop();
-        }
-        auto frame = std::move(queue.front());
-        lastframe = frame.clone();
-        queue.pop();
-        return frame;
-    }
-
-    bool empty() {
-        std::lock_guard<std::mutex> lock(mutex);
-        return queue.empty();
-    }
-};
 
 
 class IRToolTracking {

@@ -127,6 +127,4 @@ struct IRTrackedTool
 	cv::Vec3f cur_position_cheap{};
 	std::vector<cv::Vec3f> unfiltered_sphere_positions;
 	double timestamp{ 0 };
-
-	bool tracking_finished = true;
 };
