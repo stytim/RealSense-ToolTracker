@@ -3,12 +3,20 @@
 #include <vector>
 #include <map>
 #include <thread>
+#include <cmath>
 #include <cstdint>
 
 #include <opencv2/core.hpp>
 #include <opencv2/video/tracking.hpp>
 
 #include "IRKalmanFilter.h"
+
+// Bucket sphere radii at 0.1 mm so map<float,...> keys are no longer
+// vulnerable to bit-exact float equality when the same nominal value is
+// produced by different expressions (UI input vs. calibration output).
+inline int SphereRadiusKey(float radius_mm) {
+	return static_cast<int>(std::lround(radius_mm * 10.0f));
+}
 
 struct Side
 {
@@ -30,7 +38,7 @@ struct AHATFrame {
 	double timestamp;
 	cv::Mat device_pose;
 	cv::Mat cvAbImage;
-	uint16_t* pDepth;
+	std::vector<uint16_t> pDepth;
 	uint32_t depthWidth;
 	uint32_t depthHeight;
 };
@@ -41,9 +49,9 @@ struct ProcessedAHATFrame
 	cv::Mat device_pose;
 	uint num_spheres;
 	cv::Mat3f spheres_xyd;
-	std::map<float, cv::Mat3f> spheres_xyz_per_mm;
-	std::map<float, std::vector<Side>> ordered_sides_per_mm;
-	std::map<float, cv::Mat> map_per_mm;
+	std::map<int, cv::Mat3f> spheres_xyz_per_mm;
+	std::map<int, std::vector<Side>> ordered_sides_per_mm;
+	std::map<int, cv::Mat> map_per_mm;
 };
 
 struct ToolResult

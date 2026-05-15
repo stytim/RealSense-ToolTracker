@@ -282,11 +282,16 @@ void ViewerWindow::UdpReceiveThreadFunction()
     }
 
 
+    std::vector<uint8_t> buffer(sizeof(TrackingData));
     while (multiEnabled)
     {
+        // Wait up to 50 ms for a packet so the loop doesn't burn a core when idle.
+        const int ready = nanosockets_poll(receiveSocket, 50);
+        if (ready <= 0) {
+            continue;
+        }
+
         NanoAddress sender;
-		std::vector<uint8_t> buffer(sizeof(TrackingData));
-        //toolTransforms.clear();
         if (nanosockets_receive(receiveSocket, &sender, buffer.data(), buffer.size()) > 0)
         {
 			TrackingData data;
@@ -574,6 +579,18 @@ void ViewerWindow::Render() {
 
         // Adjust the size of the tools vector based on numTools
         numTools = std::max(numTools, 1);
+        if (static_cast<int>(tools.size()) > numTools)
+        {
+            // Unregister any tools that are about to be dropped so the tracker
+            // doesn't keep matching ghosts.
+            for (int i = numTools; i < static_cast<int>(tools.size()); ++i)
+            {
+                if (tools[i].isAdded)
+                {
+                    tracker.RemoveToolDefinition(tools[i].toolName);
+                }
+            }
+        }
         if (static_cast<int>(tools.size()) != numTools)
         {
             tools.resize(numTools);
@@ -583,6 +600,7 @@ void ViewerWindow::Render() {
         ImGui::SetNextWindowSize(ImVec2(windowWidth, 0.0f));
         ImGui::Begin("Tool Definitions", nullptr, overlayFlags);
 
+        isToolAdded = false;
         for (int toolIdx = 0; toolIdx < numTools; ++toolIdx)
         {
             tools[toolIdx].toolName = tools[toolIdx].toolName == "Tool" ? "Tool" + std::to_string(toolIdx + 1) : tools[toolIdx].toolName;

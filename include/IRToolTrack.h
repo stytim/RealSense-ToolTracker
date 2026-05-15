@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <map>
+#include <memory>
 #include <thread>
 #include <atomic>
 #include <cstdint>
@@ -60,11 +61,11 @@ public:
 
 private:
 
-	bool ProcessFrame(AHATFrame* rawFrame, ProcessedAHATFrame& result);
+	bool ProcessFrame(AHATFrame& rawFrame, ProcessedAHATFrame& result);
 
 	void TrackTool(IRTrackedTool &tool, const ProcessedAHATFrame &frame, ToolResultContainer &result);
 
-	void UnionSegmentation(ToolResultContainer* raw_solutions, int num_tools, const ProcessedAHATFrame &frame);
+	void UnionSegmentation(std::vector<ToolResultContainer> &raw_solutions, const ProcessedAHATFrame &frame);
 
 	cv::Mat MatchPointsKabsch(IRTrackedTool &tool, const ProcessedAHATFrame &frame, const std::vector<int> &sphere_ids, const std::vector<int> &occluded_nodes);
 
@@ -77,7 +78,7 @@ private:
 
 	std::vector<IRTrackedTool> m_Tools;
 
-	AHATFrame* m_CurrentFrame = nullptr;
+	std::unique_ptr<AHATFrame> m_CurrentFrame;
 	std::mutex m_MutexCurFrame;
 
 	std::map<std::string, int> m_ToolIndexMapping;
