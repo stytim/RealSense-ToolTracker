@@ -52,11 +52,13 @@ jobs:
             libwayland-dev libxkbcommon-dev \
             libusb-1.0-0-dev libudev-dev
 
-          # Intel RealSense apt repo (signed-by, the modern Debian way).
+          # Intel RealSense apt repo. The key is published in ASCII-armored
+          # form but apt's signed-by needs the binary form — dearmor it
+          # ourselves before dropping it in /etc/apt/keyrings.
           sudo install -m 0755 -d /etc/apt/keyrings
           curl -fsSL https://librealsense.intel.com/Debian/librealsense.pgp \
-            | sudo tee /etc/apt/keyrings/librealsense.pgp >/dev/null
-          echo "deb [signed-by=/etc/apt/keyrings/librealsense.pgp] https://librealsense.intel.com/Debian/apt-repo $(lsb_release -cs) main" \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/librealsense.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/librealsense.gpg] https://librealsense.intel.com/Debian/apt-repo $(lsb_release -cs) main" \
             | sudo tee /etc/apt/sources.list.d/librealsense.list
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends librealsense2-dev librealsense2-utils
@@ -97,8 +99,14 @@ jobs:
           "$opencvDir\x64\vc16\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
           Write-Host "Downloading Intel RealSense SDK installer..."
-          $rsVersion = "2.55.1.5474"
-          $rsUrl = "https://github.com/IntelRealSense/librealsense/releases/download/v2.55.1/Intel.RealSense.SDK-WIN10-$rsVersion.exe"
+          # Bump these together if Intel cuts a new SDK release.
+          # The exact filename format ("RealSense.SDK-WIN10-X.Y.Z.B.exe") changes
+          # release-to-release, so check the assets list at
+          # https://github.com/IntelRealSense/librealsense/releases/latest before
+          # changing the tag.
+          $rsTag = "v2.57.7"
+          $rsBuild = "2.57.7.10378"
+          $rsUrl = "https://github.com/IntelRealSense/librealsense/releases/download/$rsTag/RealSense.SDK-WIN10-$rsBuild.exe"
           Invoke-WebRequest -Uri $rsUrl -OutFile "$env:RUNNER_TEMP\rs-installer.exe"
           Write-Host "Running silent install (InnoSetup)..."
           Start-Process -FilePath "$env:RUNNER_TEMP\rs-installer.exe" `

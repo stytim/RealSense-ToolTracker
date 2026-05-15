@@ -50,8 +50,8 @@ jobs:
 
           sudo install -m 0755 -d /etc/apt/keyrings
           curl -fsSL https://librealsense.intel.com/Debian/librealsense.pgp \
-            | sudo tee /etc/apt/keyrings/librealsense.pgp >/dev/null
-          echo "deb [signed-by=/etc/apt/keyrings/librealsense.pgp] https://librealsense.intel.com/Debian/apt-repo $(lsb_release -cs) main" \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/librealsense.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/librealsense.gpg] https://librealsense.intel.com/Debian/apt-repo $(lsb_release -cs) main" \
             | sudo tee /etc/apt/sources.list.d/librealsense.list
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends librealsense2-dev librealsense2-utils
@@ -77,8 +77,10 @@ jobs:
           "OpenCV_DIR=$opencvDir" | Out-File -FilePath $env:GITHUB_ENV -Append
           "$opencvDir\x64\vc16\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
-          $rsVersion = "2.55.1.5474"
-          $rsUrl = "https://github.com/IntelRealSense/librealsense/releases/download/v2.55.1/Intel.RealSense.SDK-WIN10-$rsVersion.exe"
+          # Bump these together if Intel cuts a new SDK release; see comment in build.yml.
+          $rsTag = "v2.57.7"
+          $rsBuild = "2.57.7.10378"
+          $rsUrl = "https://github.com/IntelRealSense/librealsense/releases/download/$rsTag/RealSense.SDK-WIN10-$rsBuild.exe"
           Invoke-WebRequest -Uri $rsUrl -OutFile "$env:RUNNER_TEMP\rs-installer.exe"
           Start-Process -FilePath "$env:RUNNER_TEMP\rs-installer.exe" `
             -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' `
