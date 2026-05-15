@@ -4,6 +4,8 @@
 #include <fstream>
 #include <vector>
 #include <cstdint>
+#include <cmath>
+#include <cstring>
 
 class ROMParser {
 public:
@@ -31,8 +33,28 @@ private:
     int num_markers = 4;
 
     void parse_rom_data(const std::vector<char>& rom_data) {
-        num_markers = static_cast<unsigned char>(rom_data[28]);
-        int pos = 72;
+        constexpr int kMarkerCountOffset = 28;
+        constexpr int kMarkerDataOffset = 72;
+        constexpr int kMarkerStride = 12;
+
+        if (rom_data.size() <= kMarkerCountOffset) {
+            std::cerr << "ROM file too small to contain marker count." << std::endl;
+            num_markers = 0;
+            return;
+        }
+
+        const int candidate_count = static_cast<unsigned char>(rom_data[kMarkerCountOffset]);
+        const std::size_t required = static_cast<std::size_t>(kMarkerDataOffset) +
+                                     static_cast<std::size_t>(candidate_count) * kMarkerStride;
+        if (rom_data.size() < required) {
+            std::cerr << "ROM file too small for declared marker count (" << candidate_count
+                      << ")." << std::endl;
+            num_markers = 0;
+            return;
+        }
+
+        num_markers = candidate_count;
+        int pos = kMarkerDataOffset;
         for (int i = 0; i < num_markers; ++i) {
             float x, y, z;
             std::memcpy(&x, &rom_data[pos], sizeof(float));
@@ -51,7 +73,7 @@ private:
             marker_positions.push_back(y);
             marker_positions.push_back(z);
 
-            pos += 12;
+            pos += kMarkerStride;
         }
     }
 };

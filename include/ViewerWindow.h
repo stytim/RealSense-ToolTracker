@@ -6,7 +6,8 @@
 #include <GLFW/glfw3.h>
 #include <vector>
 #include <string>
-#include <nanosockets.h> 
+#include <atomic>
+#include <nanosockets.h>
 #include "IRToolTracking.h"
 
 class ViewerWindow {
@@ -52,13 +53,13 @@ private:
     std::shared_ptr<std::thread> processingThread;
 
     std::shared_ptr<std::thread> udpThread;
-    bool udpEnabled = false;
+    std::atomic<bool> udpEnabled{false};
 
     std::shared_ptr<std::thread> udpReceiveThread;
-    bool multiEnabled = false;
+    std::atomic<bool> multiEnabled{false};
 
     std::shared_ptr<std::thread> csvThread;
-    bool csvEnabled = false;
+    std::atomic<bool> csvEnabled{false};
 
     std::map<long long, Eigen::Matrix4f> extrinsics;
 
@@ -104,7 +105,7 @@ private:
     int recordFrequency = 10;
     int duration = 20;
     std::string csvFileName = "tracking_data.csv";
-    bool finishedRecord = false;
+    std::atomic<bool> finishedRecord{false};
 };
 
 #endif // VIEWER_WINDOW_H

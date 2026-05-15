@@ -194,15 +194,22 @@ void IRToolTracking::processStreams() {
         cv::Mat left_frame_image(cv::Size(frame_width, frame_height), CV_8UC1, (void*)ir_frame_left.get_data(), cv::Mat::AUTO_STEP);
         cv::Mat depth_frame_image(cv::Size(frame_width, frame_height), CV_16UC1, (void*)depth_frame.get_data(), cv::Mat::AUTO_STEP);
         
-        if (m_IRToolTracker != nullptr && (m_IRToolTracker->IsTracking() || m_IRToolTracker->IsCalibrating()) && timestamp > m_latestTrackedFrame)
+        if (m_IRToolTracker != nullptr)
         {
-            // Create a 4x4 identity matrix
-            cv::Mat pose = cv::Mat::eye(4, 4, CV_32F);
-            m_IRToolTracker->AddFrame(left_frame_image.data, depth_frame_image.data, left_frame_image.cols, left_frame_image.rows, pose ,timestamp);
-            m_latestTrackedFrame = playFromFile ? -1 : timestamp;
+            if ((m_IRToolTracker->IsTracking() || m_IRToolTracker->IsCalibrating()) && timestamp > m_latestTrackedFrame)
+            {
+                // Create a 4x4 identity matrix
+                cv::Mat pose = cv::Mat::eye(4, 4, CV_32F);
+                m_IRToolTracker->AddFrame(left_frame_image.data, depth_frame_image.data, left_frame_image.cols, left_frame_image.rows, pose ,timestamp);
+                m_latestTrackedFrame = playFromFile ? -1 : timestamp;
+            }
+
+            cv::Mat preview = m_IRToolTracker->GetProcessedFrame();
+            {
+                std::lock_guard<std::mutex> lock(mtx_frames);
+                trackingFrame = preview;
+            }
         }
-        
-        trackingFrame = m_IRToolTracker->GetProcessedFrame();
     }
 }
 

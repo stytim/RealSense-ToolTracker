@@ -199,9 +199,13 @@ bool ViewerWindow::Connect(NanoSocket& _socket, NanoAddress& address, const char
     }
 
     _socket = nanosockets_create(1024, 1024);
-    if (socket < 0)
+    if (_socket < 0)
     {
         std::cerr << "Failed to create a socket." << std::endl;
+        if (!multiEnabled && !udpEnabled)
+        {
+            nanosockets_deinitialize();
+        }
         return false;
     }
 
@@ -212,6 +216,11 @@ bool ViewerWindow::Connect(NanoSocket& _socket, NanoAddress& address, const char
         if (nanosockets_address_set_ip(&address, "127.0.0.1"))
         {
             std::cerr<<"Error setting default address"<<std::endl;
+            nanosockets_destroy(&_socket);
+            if (!multiEnabled && !udpEnabled)
+            {
+                nanosockets_deinitialize();
+            }
             return false;
         }
     }
@@ -220,6 +229,11 @@ bool ViewerWindow::Connect(NanoSocket& _socket, NanoAddress& address, const char
         if (nanosockets_address_set_hostname(&address, host))
         {
             std::cerr << "Error setting hostname to " << host << std::endl;
+            nanosockets_destroy(&_socket);
+            if (!multiEnabled && !udpEnabled)
+            {
+                nanosockets_deinitialize();
+            }
             return false;
         }
     }
@@ -385,7 +399,7 @@ void ViewerWindow::UdpThreadFunction()
             }
         }
 
-        int sleepDurationMs = 1000 / frequency; // Convert frequency to sleep duration in milliseconds
+        int sleepDurationMs = 1000 / std::max(frequency, 1);
         std::this_thread::sleep_for(std::chrono::milliseconds(sleepDurationMs));
     }
 
@@ -459,7 +473,7 @@ void ViewerWindow::WriteToCSV()
             }
         }
 
-        int sleepDurationMs = 1000 / recordFrequency; 
+        int sleepDurationMs = 1000 / std::max(recordFrequency, 1);
         std::this_thread::sleep_for(std::chrono::milliseconds(sleepDurationMs));
 	}
 
@@ -746,15 +760,19 @@ void ViewerWindow::Render() {
         ImGui::SetNextItemWidth(110);
         ImGui::InputInt("Frequency", &frequency);
         ImGui::SameLine();
-        if (ImGui::Checkbox("UDP", &udpEnabled))
         {
-            if (udpEnabled)
+            bool udpEnabledTmp = udpEnabled.load();
+            if (ImGui::Checkbox("UDP", &udpEnabledTmp))
             {
-                udpThread = std::make_shared<std::thread>(&ViewerWindow::UdpThreadFunction, this);
-            }
-            else
-            {
-                JoinThread(udpThread);
+                udpEnabled.store(udpEnabledTmp);
+                if (udpEnabledTmp)
+                {
+                    udpThread = std::make_shared<std::thread>(&ViewerWindow::UdpThreadFunction, this);
+                }
+                else
+                {
+                    JoinThread(udpThread);
+                }
             }
         }
         ImGui::End();
@@ -763,15 +781,19 @@ void ViewerWindow::Render() {
         ImGui::SetNextWindowSize(ImVec2(300, 0.0f));
         ImGui::SetNextWindowPos(ImVec2(740, 80), ImGuiCond_FirstUseEver);
         ImGui::Begin("Multi-Camera Settings", nullptr, overlayFlags);
-        if (ImGui::Checkbox("Multi-Camera", &multiEnabled))
         {
-            if (multiEnabled)
+            bool multiEnabledTmp = multiEnabled.load();
+            if (ImGui::Checkbox("Multi-Camera", &multiEnabledTmp))
             {
-                udpReceiveThread = std::make_shared<std::thread>(&ViewerWindow::UdpReceiveThreadFunction, this);
-            }
-            else
-            {
-                JoinThread(udpReceiveThread);
+                multiEnabled.store(multiEnabledTmp);
+                if (multiEnabledTmp)
+                {
+                    udpReceiveThread = std::make_shared<std::thread>(&ViewerWindow::UdpReceiveThreadFunction, this);
+                }
+                else
+                {
+                    JoinThread(udpReceiveThread);
+                }
             }
         }
         ImGui::SameLine();
@@ -802,17 +824,21 @@ void ViewerWindow::Render() {
             NFD_Quit();
         }
         ImGui::SameLine();
-        if (ImGui::Checkbox("Record", &csvEnabled))
         {
-            if (csvEnabled)
+            bool csvEnabledTmp = csvEnabled.load();
+            if (ImGui::Checkbox("Record", &csvEnabledTmp))
             {
-				csvThread = std::make_shared<std::thread>(&ViewerWindow::WriteToCSV, this);
-			}
-            else
-            {
-				JoinThread(csvThread);
-			}
-		}
+                csvEnabled.store(csvEnabledTmp);
+                if (csvEnabledTmp)
+                {
+                    csvThread = std::make_shared<std::thread>(&ViewerWindow::WriteToCSV, this);
+                }
+                else
+                {
+                    JoinThread(csvThread);
+                }
+            }
+        }
         ImGui::End();
         recordFrequency = std::min(std::max(recordFrequency, 1), 90);
         duration = std::max(duration, 1);
@@ -933,11 +959,17 @@ void ViewerWindow::Shutdown() {
     Terminated = true;
     udpEnabled = false;
     multiEnabled = false;
+    csvEnabled = false;
+
+    const bool pipelineRunning = tracker.IsTrackingTools() || tracker.IsCalibratingTool();
+
     tracker.StopToolTracking();
+    tracker.StopToolCalibration();
     JoinThread(processingThread);
     JoinThread(udpThread);
     JoinThread(udpReceiveThread);
     JoinThread(csvThread);
-    if (tracker.IsTrackingTools() || tracker.IsCalibratingTool())
+
+    if (pipelineRunning)
         tracker.shutdown();
 }

@@ -3,6 +3,7 @@
 #include <vector>
 #include <map>
 #include <thread>
+#include <atomic>
 #include <cstdint>
 
 #include <Eigen/Eigen>
@@ -30,6 +31,8 @@ public:
 			m_pRealSenseToolTracking = pRealSenseToolTracking;
 		}
 
+	~IRToolTracker();
+
 
 	void AddFrame(void* pAbImage, void* pDepth, uint32_t depthWidth, uint32_t depthHeight, cv::Mat _pose, double _timestamp);
 	bool AddTool(cv::Mat3f spheres, float sphere_radius, std::string identifier, uint min_visible_spheres, float lowpass_rotation, float lowpass_position);
@@ -43,7 +46,7 @@ public:
 	void SetThreshold(int threshold);
 	void SetMinMaxSize(int min, int max);
 
-	const cv::Mat& GetProcessedFrame();
+	cv::Mat GetProcessedFrame();
 
 
 	void StopTracking();
@@ -59,18 +62,18 @@ private:
 
 	bool ProcessFrame(AHATFrame* rawFrame, ProcessedAHATFrame& result);
 
-	void TrackTool(IRTrackedTool &tool, ProcessedAHATFrame &frame, ToolResultContainer &result);
+	void TrackTool(IRTrackedTool &tool, const ProcessedAHATFrame &frame, ToolResultContainer &result);
 
-	void UnionSegmentation(ToolResultContainer* raw_solutions, int num_tools, ProcessedAHATFrame frame);
+	void UnionSegmentation(ToolResultContainer* raw_solutions, int num_tools, const ProcessedAHATFrame &frame);
 
-	cv::Mat MatchPointsKabsch(IRTrackedTool tool, ProcessedAHATFrame frame, std::vector<int> sphere_ids, std::vector<int> occluded_nodes);
+	cv::Mat MatchPointsKabsch(IRTrackedTool &tool, const ProcessedAHATFrame &frame, const std::vector<int> &sphere_ids, const std::vector<int> &occluded_nodes);
 
 	cv::Mat FlipTransformRightLeft(cv::Mat hololens_transform);
 
 	void ConstructMap(cv::Mat3f spheres_xyz, int num_spheres, cv::Mat& result_map, std::vector<Side>& result_ordered_sides);
 
 
-	bool m_bShouldStop = false;
+	std::atomic<bool> m_bShouldStop{false};
 
 	std::vector<IRTrackedTool> m_Tools;
 
@@ -82,8 +85,8 @@ private:
 	float m_fToleranceSide = 4.0f;
 	float m_fToleranceAvg = 4.0f;
 
-	bool m_bIsCurrentlyTracking = false;
-	bool m_bIsCurrentlyCalibrating = false;
+	std::atomic<bool> m_bIsCurrentlyTracking{false};
+	std::atomic<bool> m_bIsCurrentlyCalibrating{false};
 
 	std::shared_ptr<std::thread> m_TrackingThread;
 	std::shared_ptr<std::thread> m_CalibrationThread;
@@ -91,7 +94,12 @@ private:
 	double m_lTrackedTimestamp = 0;
 
 	std::mutex mtx_frames;
+	// Tracking-thread-only scratch buffer drawn into during each ProcessFrame/MatchPointsKabsch.
+	cv::Mat m_WorkingFrame;
+	// Published copy snapshot to viewers; only touched under mtx_frames.
 	cv::Mat m_ProcessedFrame;
+
+	void PublishWorkingFrame();
 
 	IRToolTracking* m_pRealSenseToolTracking;
 

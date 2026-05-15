@@ -3,6 +3,24 @@
 #include <set>
 
 
+IRToolTracker::~IRToolTracker()
+{
+	m_bShouldStop = true;
+	if (m_TrackingThread && m_TrackingThread->joinable()) {
+		try { m_TrackingThread->join(); } catch (const std::system_error&) {}
+	}
+	if (m_CalibrationThread && m_CalibrationThread->joinable()) {
+		try { m_CalibrationThread->join(); } catch (const std::system_error&) {}
+	}
+	std::lock_guard<std::mutex> lock(m_MutexCurFrame);
+	if (m_CurrentFrame != nullptr) {
+		delete[] m_CurrentFrame->pDepth;
+		delete m_CurrentFrame;
+		m_CurrentFrame = nullptr;
+	}
+}
+
+
 #define DISABLE_LOWPASS FALSE
 #define DISABLE_KALMAN FALSE
 
@@ -41,42 +59,26 @@ void IRToolTracker::TrackTools()
 		m_CurrentFrame = nullptr;
 		m_MutexCurFrame.unlock();
 
-		int current_num_tools = m_Tools.size();
-		ToolResultContainer* raw_results = new ToolResultContainer[current_num_tools];
-
 		ProcessedAHATFrame processedFrame;
-
 		if (!ProcessFrame(rawFrame, processedFrame)) {
 			continue;
 		}
-		
-		//std::vector<std::thread> tool_track_threads(current_num_tools);
+
+		const int current_num_tools = static_cast<int>(m_Tools.size());
+		std::vector<ToolResultContainer> raw_results(current_num_tools);
 
 		for (int i = 0; i < current_num_tools; i++) {
-			IRTrackedTool tool = m_Tools.at(i);
-			if (!tool.tracking_finished)
-				continue;
-
-			ToolResultContainer result{ i, std::vector<ToolResult>() };
-			
-			//tool_track_threads.at(i) = std::thread(&IRToolTracker::TrackTool, this, tool, processedFrame, result);
-			TrackTool(tool, processedFrame, result);
-			raw_results[i] = result;
-			//ProcessEnvFrame(processedFrame, result);
+			raw_results[i].tool_id = i;
+			TrackTool(m_Tools.at(i), processedFrame, raw_results[i]);
 		}
 
-		//for (auto & thread : tool_track_threads) {
-		//	thread.join();
-		//}
-		UnionSegmentation(raw_results, current_num_tools, processedFrame);
-
-		delete[] raw_results;
-		//TODO: make sure i didnt create a memory leak here
+		UnionSegmentation(raw_results.data(), current_num_tools, processedFrame);
+		PublishWorkingFrame();
 	}
 	m_bIsCurrentlyTracking = false;
 }
 
-void IRToolTracker::TrackTool(IRTrackedTool &tool, ProcessedAHATFrame &frame, ToolResultContainer &result)
+void IRToolTracker::TrackTool(IRTrackedTool &tool, const ProcessedAHATFrame &frame, ToolResultContainer &result)
 {
 	tool.tracking_finished = false;
 	if (frame.num_spheres < tool.min_visible_spheres) {
@@ -238,15 +240,12 @@ void IRToolTracker::TrackTool(IRTrackedTool &tool, ProcessedAHATFrame &frame, To
 
 
 
-void IRToolTracker::UnionSegmentation(ToolResultContainer* raw_solutions, int num_tools, ProcessedAHATFrame frame) {
-	int* tool_solutions = new int[num_tools];
+void IRToolTracker::UnionSegmentation(ToolResultContainer* raw_solutions, int num_tools, const ProcessedAHATFrame &frame) {
 	std::vector<ToolResult> unique_solutions;
 	for (int i = 0; i < num_tools; i++)
 	{
-		tool_solutions[i] = 0;
 		ToolResultContainer tool_results = raw_solutions[i];
-		
-		//std::cout << "Tool " << i << " has " << tool_results.candidates.size() << " candidates" << std::endl;
+
 		if (tool_results.candidates.size() == 0)
 			continue;
 
@@ -257,7 +256,6 @@ void IRToolTracker::UnionSegmentation(ToolResultContainer* raw_solutions, int nu
 		{
 			candidate.tool_id = i;
 			unique_solutions.push_back(candidate);
-			tool_solutions[i]++;
 		}
 	}
 
@@ -309,13 +307,12 @@ void IRToolTracker::UnionSegmentation(ToolResultContainer* raw_solutions, int nu
 		}
 		unique_solutions = remaining_unique_solutions;
 	}
-	delete[] tool_solutions;
 	m_lTrackedTimestamp = frame.timestamp;
 	return;
 }
 
-cv::Mat IRToolTracker::MatchPointsKabsch(IRTrackedTool tool, ProcessedAHATFrame frame, std::vector<int> sphere_ids, std::vector<int> occluded_nodes) {
-	int num_points = tool.num_spheres-occluded_nodes.size();
+cv::Mat IRToolTracker::MatchPointsKabsch(IRTrackedTool &tool, const ProcessedAHATFrame &frame, const std::vector<int> &sphere_ids, const std::vector<int> &occluded_nodes) {
+	int num_points = static_cast<int>(tool.num_spheres) - static_cast<int>(occluded_nodes.size());
 	cv::Mat p = cv::Mat(num_points, 3, CV_32F);
 	cv::Mat q = cv::Mat(num_points, 3, CV_32F);
 	cv::Vec3f p_center = cv::Vec3f(0.f);
@@ -363,7 +360,7 @@ cv::Mat IRToolTracker::MatchPointsKabsch(IRTrackedTool tool, ProcessedAHATFrame 
 
 		m_pRealSenseToolTracking->ProjectPointToPixel(xyz,uv);
     	cv::Point center(uv[0], uv[1]);
-		cv::drawMarker(m_ProcessedFrame, center, cv::Scalar(0, 255, 0), cv::MARKER_CROSS, 20, 2);
+		cv::drawMarker(m_WorkingFrame, center, cv::Scalar(0, 255, 0), cv::MARKER_CROSS, 20, 2);
 
 		cv::Mat sphere_world_mat = hololens_pose_mm * sphere_frame_mat;
 		cv::Vec3f sphere_world = cv::Vec3f(sphere_world_mat.at<float>(0, 0), sphere_world_mat.at<float>(1, 0), sphere_world_mat.at<float>(2, 0));
@@ -555,10 +552,20 @@ void IRToolTracker::SetThreshold(int threshold)
 	m_Threshold = threshold;
 }
 
-const cv::Mat& IRToolTracker::GetProcessedFrame()
+cv::Mat IRToolTracker::GetProcessedFrame()
 {
 	std::lock_guard<std::mutex> lock(mtx_frames);
-	return m_ProcessedFrame;
+	if (m_ProcessedFrame.empty())
+		return cv::Mat();
+	return m_ProcessedFrame.clone();
+}
+
+void IRToolTracker::PublishWorkingFrame()
+{
+	if (m_WorkingFrame.empty())
+		return;
+	std::lock_guard<std::mutex> lock(mtx_frames);
+	m_WorkingFrame.copyTo(m_ProcessedFrame);
 }
 
 void IRToolTracker::SetMinMaxSize(int min, int max)
@@ -582,7 +589,7 @@ bool IRToolTracker::ProcessFrame(AHATFrame* rawFrame, ProcessedAHATFrame &result
 	);
 	
 	rawFrame->cvAbImage.convertTo(rawFrame->cvAbImage, CV_8UC1);
-	cv::cvtColor(rawFrame->cvAbImage.clone(), m_ProcessedFrame, cv::COLOR_GRAY2RGB);
+	cv::cvtColor(rawFrame->cvAbImage, m_WorkingFrame, cv::COLOR_GRAY2RGB);
 	
 
 	int areaCount = cv::connectedComponentsWithStats(rawFrame->cvAbImage, labels, stats, centroids, 8);
@@ -689,7 +696,7 @@ bool IRToolTracker::ProcessFrame(AHATFrame* rawFrame, ProcessedAHATFrame &result
 				// Convert point coordinates to cv::Point
 				cv::Point center(uv[0], uv[1]);
 
-				cv::drawMarker(m_ProcessedFrame, center, cv::Scalar(255, 255, 0), cv::MARKER_CROSS, 20, 2);
+				cv::drawMarker(m_WorkingFrame, center, cv::Scalar(255, 255, 0), cv::MARKER_CROSS, 20, 2);
 			}
 		);
 		
@@ -802,6 +809,9 @@ bool IRToolTracker::RemoveTool(std::string identifier)
 
 bool IRToolTracker::RemoveAllTools()
 {
+	if (m_bIsCurrentlyTracking) {
+		StopTracking();
+	}
 	m_Tools.clear();
 	m_ToolIndexMapping.clear();
 	return true;
@@ -894,6 +904,7 @@ void IRToolTracker::CalibrateTool()
 			continue;
 		}
 		processedFrames.push_back(processedFrame);
+		PublishWorkingFrame();
 
 		// If enough data is collected, perform calibration
 		if (processedFrames.size() == MAX_CALIBRATION_FRAMES) {
