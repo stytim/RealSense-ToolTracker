@@ -1,0 +1,119 @@
+name: Build
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+# Cancel an in-flight run when a newer commit lands on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            label: linux-x86_64
+          - os: macos-13
+            label: macos-x86_64
+          - os: macos-14
+            label: macos-arm64
+          - os: windows-2022
+            label: windows-x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # -------------------------------------------------------------------
+      # Linux: Intel apt repo for librealsense, plus OpenCV + GLFW system deps.
+      # -------------------------------------------------------------------
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates curl gnupg lsb-release \
+            build-essential cmake ninja-build pkg-config \
+            libopencv-dev \
+            libgl1-mesa-dev libglu1-mesa-dev \
+            libxinerama-dev libxcursor-dev libxi-dev libxrandr-dev \
+            libwayland-dev libxkbcommon-dev \
+            libusb-1.0-0-dev libudev-dev
+
+          # Intel RealSense apt repo (signed-by, the modern Debian way).
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://librealsense.intel.com/Debian/librealsense.pgp \
+            | sudo tee /etc/apt/keyrings/librealsense.pgp >/dev/null
+          echo "deb [signed-by=/etc/apt/keyrings/librealsense.pgp] https://librealsense.intel.com/Debian/apt-repo $(lsb_release -cs) main" \
+            | sudo tee /etc/apt/sources.list.d/librealsense.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends librealsense2-dev librealsense2-utils
+
+      # -------------------------------------------------------------------
+      # macOS (both x86_64 and arm64): Homebrew handles everything.
+      # librealsense's arm64 brew bottle has been bumpy historically; if it
+      # breaks here, the most likely cause is upstream brew formula state.
+      # -------------------------------------------------------------------
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          set -euxo pipefail
+          brew update
+          brew install cmake ninja opencv librealsense
+
+      # -------------------------------------------------------------------
+      # Windows: Chocolatey for OpenCV, official Intel installer for the
+      # RealSense SDK. The SDK installer drops files at the exact path the
+      # current CMakeLists hardcodes, so no extra wiring is required.
+      # -------------------------------------------------------------------
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host "Installing OpenCV via chocolatey..."
+          choco install opencv --version=4.10.0 -y --no-progress
+          # chocolatey installs to C:\tools\opencv\build by default
+          $opencvDir = "C:\tools\opencv\build"
+          if (-not (Test-Path "$opencvDir\OpenCVConfig.cmake")) {
+            # OpenCV >=4 nests the config under build\x64\vc16\lib
+            $opencvDir = Get-ChildItem -Path "C:\tools\opencv" -Recurse -Filter "OpenCVConfig.cmake" | Select-Object -First 1 -ExpandProperty Directory | Select-Object -ExpandProperty FullName
+          }
+          Write-Host "Resolved OpenCV_DIR=$opencvDir"
+          "OpenCV_DIR=$opencvDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$opencvDir\x64\vc16\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+          Write-Host "Downloading Intel RealSense SDK installer..."
+          $rsVersion = "2.55.1.5474"
+          $rsUrl = "https://github.com/IntelRealSense/librealsense/releases/download/v2.55.1/Intel.RealSense.SDK-WIN10-$rsVersion.exe"
+          Invoke-WebRequest -Uri $rsUrl -OutFile "$env:RUNNER_TEMP\rs-installer.exe"
+          Write-Host "Running silent install (InnoSetup)..."
+          Start-Process -FilePath "$env:RUNNER_TEMP\rs-installer.exe" `
+            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' `
+            -Wait
+          if (-not (Test-Path "C:\Program Files (x86)\Intel RealSense SDK 2.0\lib\x64\realsense2.lib")) {
+            throw "RealSense SDK install did not produce expected files."
+          }
+
+      # -------------------------------------------------------------------
+      # Configure + build. /MT linkage on Windows + prebuilt OpenCV (/MD)
+      # relies on the /FORCE linker flag already set in CMakeLists.
+      # -------------------------------------------------------------------
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel

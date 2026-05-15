@@ -1,0 +1,220 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            label: linux-x86_64
+          - os: macos-13
+            label: macos-x86_64
+          - os: macos-14
+            label: macos-arm64
+          - os: windows-2022
+            label: windows-x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # -----------------------------------------------------------------
+      # Platform-specific dependency install (kept in sync with build.yml).
+      # -----------------------------------------------------------------
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates curl gnupg lsb-release \
+            build-essential cmake ninja-build pkg-config patchelf \
+            libopencv-dev \
+            libgl1-mesa-dev libglu1-mesa-dev \
+            libxinerama-dev libxcursor-dev libxi-dev libxrandr-dev \
+            libwayland-dev libxkbcommon-dev \
+            libusb-1.0-0-dev libudev-dev
+
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://librealsense.intel.com/Debian/librealsense.pgp \
+            | sudo tee /etc/apt/keyrings/librealsense.pgp >/dev/null
+          echo "deb [signed-by=/etc/apt/keyrings/librealsense.pgp] https://librealsense.intel.com/Debian/apt-repo $(lsb_release -cs) main" \
+            | sudo tee /etc/apt/sources.list.d/librealsense.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends librealsense2-dev librealsense2-utils
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          set -euxo pipefail
+          brew update
+          brew install cmake ninja opencv librealsense dylibbundler
+
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          choco install opencv --version=4.10.0 -y --no-progress
+          $opencvDir = "C:\tools\opencv\build"
+          if (-not (Test-Path "$opencvDir\OpenCVConfig.cmake")) {
+            $opencvDir = Get-ChildItem -Path "C:\tools\opencv" -Recurse -Filter "OpenCVConfig.cmake" | Select-Object -First 1 -ExpandProperty Directory | Select-Object -ExpandProperty FullName
+          }
+          "OpenCV_DIR=$opencvDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$opencvDir\x64\vc16\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+          $rsVersion = "2.55.1.5474"
+          $rsUrl = "https://github.com/IntelRealSense/librealsense/releases/download/v2.55.1/Intel.RealSense.SDK-WIN10-$rsVersion.exe"
+          Invoke-WebRequest -Uri $rsUrl -OutFile "$env:RUNNER_TEMP\rs-installer.exe"
+          Start-Process -FilePath "$env:RUNNER_TEMP\rs-installer.exe" `
+            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' `
+            -Wait
+          if (-not (Test-Path "C:\Program Files (x86)\Intel RealSense SDK 2.0\lib\x64\realsense2.lib")) {
+            throw "RealSense SDK install did not produce expected files."
+          }
+
+      # -----------------------------------------------------------------
+      # Configure + build.
+      # -----------------------------------------------------------------
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      # -----------------------------------------------------------------
+      # Package: stage the binary plus its RealSense / OpenCV runtime
+      # libraries into dist/, then tar/zip it.
+      # -----------------------------------------------------------------
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          STAGE="dist/ir-tracking-app-${{ matrix.label }}"
+          mkdir -p "$STAGE/lib"
+          cp build/ir-tracking-app "$STAGE/"
+
+          # Bundle every linked librealsense / libopencv .so. ldd reports a path
+          # like "libfoo.so => /usr/lib/x86_64-linux-gnu/libfoo.so.1 (0x...)"
+          ldd build/ir-tracking-app \
+            | awk '/(librealsense|libopencv|libtbb|libusb-1\.0)/ { print $3 }' \
+            | grep -v '^$' \
+            | sort -u \
+            | while read -r lib; do
+                cp -L "$lib" "$STAGE/lib/"
+              done
+
+          patchelf --set-rpath '$ORIGIN/lib' "$STAGE/ir-tracking-app"
+
+          # Tiny launcher so users can double-click without worrying about
+          # LD_LIBRARY_PATH or working directory.
+          cat > "$STAGE/run.sh" <<'SH'
+          #!/usr/bin/env bash
+          cd "$(dirname "$0")"
+          exec ./ir-tracking-app "$@"
+          SH
+          chmod +x "$STAGE/run.sh"
+
+          tar -czf "ir-tracking-app-${{ matrix.label }}.tar.gz" -C dist "ir-tracking-app-${{ matrix.label }}"
+          ls -lh "ir-tracking-app-${{ matrix.label }}.tar.gz"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euxo pipefail
+          STAGE="dist/ir-tracking-app-${{ matrix.label }}"
+          mkdir -p "$STAGE"
+          cp build/ir-tracking-app "$STAGE/"
+
+          # dylibbundler walks the binary's load commands recursively, copies
+          # every non-system dylib into dist/libs and rewrites install names to
+          # @executable_path/libs/. Avoids the per-dylib otool dance.
+          dylibbundler -od -b \
+            -x "$STAGE/ir-tracking-app" \
+            -d "$STAGE/libs" \
+            -p "@executable_path/libs/" \
+            || true
+
+          # Cosmetic launcher mirrors the Linux one.
+          cat > "$STAGE/run.sh" <<'SH'
+          #!/usr/bin/env bash
+          cd "$(dirname "$0")"
+          exec ./ir-tracking-app "$@"
+          SH
+          chmod +x "$STAGE/run.sh"
+
+          tar -czf "ir-tracking-app-${{ matrix.label }}.tar.gz" -C dist "ir-tracking-app-${{ matrix.label }}"
+          ls -lh "ir-tracking-app-${{ matrix.label }}.tar.gz"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = "dist\ir-tracking-app-${{ matrix.label }}"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          # The CMake build output landed under build\Release\.
+          $exe = "build\Release\ir-tracking-app.exe"
+          if (-not (Test-Path $exe)) { $exe = "build\ir-tracking-app.exe" }  # if generator differs
+          Copy-Item $exe -Destination $stage
+
+          # RealSense runtime DLL.
+          Copy-Item "C:\Program Files (x86)\Intel RealSense SDK 2.0\bin\x64\realsense2.dll" -Destination $stage
+
+          # OpenCV runtime DLL(s) — chocolatey 4.10 ships the 'world' variant.
+          $opencvBin = Join-Path $env:OpenCV_DIR "x64\vc16\bin"
+          Get-ChildItem -Path $opencvBin -Filter "opencv_world*.dll" `
+            | Where-Object { $_.Name -notmatch "d\.dll$" } `
+            | Copy-Item -Destination $stage
+
+          Compress-Archive -Path "$stage\*" -DestinationPath "ir-tracking-app-${{ matrix.label }}.zip" -Force
+          Get-Item "ir-tracking-app-${{ matrix.label }}.zip" | Format-List Length, Name
+
+      # -----------------------------------------------------------------
+      # Hand the archive off to the release job.
+      # -----------------------------------------------------------------
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ir-tracking-app-${{ matrix.label }}
+          path: |
+            ir-tracking-app-${{ matrix.label }}.tar.gz
+            ir-tracking-app-${{ matrix.label }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
