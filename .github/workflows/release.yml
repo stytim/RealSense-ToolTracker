@@ -48,12 +48,10 @@ jobs:
             libwayland-dev libxkbcommon-dev \
             libusb-1.0-0-dev libudev-dev
 
-          # See comment in build.yml — Intel's hosted key is stale, pull from keyserver.
+          # See comment in build.yml — Intel's hosted key is stale, pull from keyserver over HTTP.
           sudo install -m 0755 -d /etc/apt/keyrings
-          sudo gpg --no-default-keyring \
-                   --keyring /etc/apt/keyrings/librealsense.gpg \
-                   --keyserver hkp://keyserver.ubuntu.com:80 \
-                   --recv-keys FB0B24895113F120
+          curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xFB0B24895113F120&options=mr" \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/librealsense.gpg
           sudo chmod 0644 /etc/apt/keyrings/librealsense.gpg
           echo "deb [signed-by=/etc/apt/keyrings/librealsense.gpg] https://librealsense.intel.com/Debian/apt-repo $(lsb_release -cs) main" \
             | sudo tee /etc/apt/sources.list.d/librealsense.list
@@ -84,7 +82,7 @@ jobs:
           # Bump these together if Intel cuts a new SDK release; see comment in build.yml.
           $rsTag = "v2.57.7"
           $rsBuild = "2.57.7.10378"
-          $rsUrl = "https://github.com/IntelRealSense/librealsense/releases/download/$rsTag/RealSense.SDK-WIN10-$rsBuild.exe"
+          $rsUrl = "https://github.com/realsenseai/librealsense/releases/download/$rsTag/RealSense.SDK-WIN10-$rsBuild.exe"
           $installer = "$env:RUNNER_TEMP\rs-installer.exe"
           Invoke-WebRequest -Uri $rsUrl -OutFile $installer
 
