@@ -52,12 +52,18 @@ jobs:
             libwayland-dev libxkbcommon-dev \
             libusb-1.0-0-dev libudev-dev
 
-          # Intel RealSense apt repo. The key is published in ASCII-armored
-          # form but apt's signed-by needs the binary form — dearmor it
-          # ourselves before dropping it in /etc/apt/keyrings.
+          # Intel RealSense apt repo. The .pgp file Intel hosts on their CDN
+          # is currently stale relative to the key that actually signs the apt
+          # InRelease metadata (apt logs "NO_PUBKEY FB0B24895113F120"), so we
+          # pull the signing key straight from Ubuntu's keyserver by fingerprint.
+          # If this ever stops working, run `apt-get update` against the repo
+          # locally to find the current key ID and update the fingerprint below.
           sudo install -m 0755 -d /etc/apt/keyrings
-          curl -fsSL https://librealsense.intel.com/Debian/librealsense.pgp \
-            | sudo gpg --dearmor -o /etc/apt/keyrings/librealsense.gpg
+          sudo gpg --no-default-keyring \
+                   --keyring /etc/apt/keyrings/librealsense.gpg \
+                   --keyserver hkp://keyserver.ubuntu.com:80 \
+                   --recv-keys FB0B24895113F120
+          sudo chmod 0644 /etc/apt/keyrings/librealsense.gpg
           echo "deb [signed-by=/etc/apt/keyrings/librealsense.gpg] https://librealsense.intel.com/Debian/apt-repo $(lsb_release -cs) main" \
             | sudo tee /etc/apt/sources.list.d/librealsense.list
           sudo apt-get update
@@ -100,27 +106,69 @@ jobs:
 
           Write-Host "Downloading Intel RealSense SDK installer..."
           # Bump these together if Intel cuts a new SDK release.
-          # The exact filename format ("RealSense.SDK-WIN10-X.Y.Z.B.exe") changes
-          # release-to-release, so check the assets list at
-          # https://github.com/IntelRealSense/librealsense/releases/latest before
-          # changing the tag.
+          # The filename format ("RealSense.SDK-WIN10-X.Y.Z.B.exe") changes
+          # release-to-release; check the latest at
+          # https://github.com/IntelRealSense/librealsense/releases/latest
           $rsTag = "v2.57.7"
           $rsBuild = "2.57.7.10378"
           $rsUrl = "https://github.com/IntelRealSense/librealsense/releases/download/$rsTag/RealSense.SDK-WIN10-$rsBuild.exe"
-          Invoke-WebRequest -Uri $rsUrl -OutFile "$env:RUNNER_TEMP\rs-installer.exe"
-          Write-Host "Running silent install (InnoSetup)..."
-          Start-Process -FilePath "$env:RUNNER_TEMP\rs-installer.exe" `
-            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' `
-            -Wait
-          if (-not (Test-Path "C:\Program Files (x86)\Intel RealSense SDK 2.0\lib\x64\realsense2.lib")) {
-            throw "RealSense SDK install did not produce expected files."
+          $installer = "$env:RUNNER_TEMP\rs-installer.exe"
+          Invoke-WebRequest -Uri $rsUrl -OutFile $installer
+          Write-Host "Installer size: $([math]::Round((Get-Item $installer).Length / 1MB, 2)) MB"
+
+          $installPath = "C:\Program Files (x86)\Intel RealSense SDK 2.0"
+          $expectedLib = "$installPath\lib\x64\realsense2.lib"
+
+          # The Windows installer packaging has changed between librealsense
+          # releases (InnoSetup -> NSIS -> InstallShield depending on the
+          # version), so try the common silent conventions in order and stop
+          # as soon as the expected library appears.
+          $flagSets = @(
+            @('/S'),
+            @('/silent'),
+            @('/quiet'),
+            @('/s'),
+            @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-')
+          )
+          foreach ($flags in $flagSets) {
+            if (Test-Path $expectedLib) { break }
+            Write-Host "Silent install attempt: $($flags -join ' ')"
+            $proc = Start-Process -FilePath $installer -ArgumentList $flags -Wait -PassThru
+            Write-Host "  exit code: $($proc.ExitCode)"
+            # Some installer wrappers exit before the real install finishes;
+            # poll the expected library path briefly.
+            for ($i = 0; $i -lt 30; $i++) {
+              if (Test-Path $expectedLib) { break }
+              Start-Sleep -Seconds 1
+            }
           }
 
+          if (-not (Test-Path $expectedLib)) {
+            Write-Host '---- Diagnostics ----'
+            if (Test-Path $installPath) {
+              Write-Host "$installPath contents:"
+              Get-ChildItem -Path $installPath -Recurse -Depth 4 -ErrorAction SilentlyContinue | Select-Object FullName
+            } else {
+              Write-Host "$installPath does not exist."
+            }
+            Write-Host 'Searching C: for realsense2.lib (slow, last resort)...'
+            Get-ChildItem -Path 'C:\' -Filter realsense2.lib -Recurse -ErrorAction SilentlyContinue | Select-Object FullName
+            throw "RealSense SDK install did not produce $expectedLib."
+          }
+          Write-Host "RealSense SDK installed at $installPath."
+
       # -------------------------------------------------------------------
-      # Configure + build. /MT linkage on Windows + prebuilt OpenCV (/MD)
-      # relies on the /FORCE linker flag already set in CMakeLists.
+      # Configure + build. Windows is pinned to the x64 VS generator so we
+      # never accidentally pick up a 32-bit toolchain (the OpenCV / RealSense
+      # libs we install above are x64-only). /MT linkage on Windows + prebuilt
+      # OpenCV (/MD) relies on the /FORCE linker flag already set in CMakeLists.
       # -------------------------------------------------------------------
-      - name: Configure
+      - name: Configure (Windows x64)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Configure (Linux / macOS)
+        if: runner.os != 'Windows'
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build

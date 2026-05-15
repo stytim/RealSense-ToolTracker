@@ -48,9 +48,13 @@ jobs:
             libwayland-dev libxkbcommon-dev \
             libusb-1.0-0-dev libudev-dev
 
+          # See comment in build.yml — Intel's hosted key is stale, pull from keyserver.
           sudo install -m 0755 -d /etc/apt/keyrings
-          curl -fsSL https://librealsense.intel.com/Debian/librealsense.pgp \
-            | sudo gpg --dearmor -o /etc/apt/keyrings/librealsense.gpg
+          sudo gpg --no-default-keyring \
+                   --keyring /etc/apt/keyrings/librealsense.gpg \
+                   --keyserver hkp://keyserver.ubuntu.com:80 \
+                   --recv-keys FB0B24895113F120
+          sudo chmod 0644 /etc/apt/keyrings/librealsense.gpg
           echo "deb [signed-by=/etc/apt/keyrings/librealsense.gpg] https://librealsense.intel.com/Debian/apt-repo $(lsb_release -cs) main" \
             | sudo tee /etc/apt/sources.list.d/librealsense.list
           sudo apt-get update
@@ -81,18 +85,48 @@ jobs:
           $rsTag = "v2.57.7"
           $rsBuild = "2.57.7.10378"
           $rsUrl = "https://github.com/IntelRealSense/librealsense/releases/download/$rsTag/RealSense.SDK-WIN10-$rsBuild.exe"
-          Invoke-WebRequest -Uri $rsUrl -OutFile "$env:RUNNER_TEMP\rs-installer.exe"
-          Start-Process -FilePath "$env:RUNNER_TEMP\rs-installer.exe" `
-            -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' `
-            -Wait
-          if (-not (Test-Path "C:\Program Files (x86)\Intel RealSense SDK 2.0\lib\x64\realsense2.lib")) {
-            throw "RealSense SDK install did not produce expected files."
+          $installer = "$env:RUNNER_TEMP\rs-installer.exe"
+          Invoke-WebRequest -Uri $rsUrl -OutFile $installer
+
+          $installPath = "C:\Program Files (x86)\Intel RealSense SDK 2.0"
+          $expectedLib = "$installPath\lib\x64\realsense2.lib"
+
+          $flagSets = @(
+            @('/S'),
+            @('/silent'),
+            @('/quiet'),
+            @('/s'),
+            @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-')
+          )
+          foreach ($flags in $flagSets) {
+            if (Test-Path $expectedLib) { break }
+            Write-Host "Silent install attempt: $($flags -join ' ')"
+            $proc = Start-Process -FilePath $installer -ArgumentList $flags -Wait -PassThru
+            Write-Host "  exit code: $($proc.ExitCode)"
+            for ($i = 0; $i -lt 30; $i++) {
+              if (Test-Path $expectedLib) { break }
+              Start-Sleep -Seconds 1
+            }
+          }
+
+          if (-not (Test-Path $expectedLib)) {
+            Write-Host '---- Diagnostics ----'
+            if (Test-Path $installPath) {
+              Get-ChildItem -Path $installPath -Recurse -Depth 4 -ErrorAction SilentlyContinue | Select-Object FullName
+            }
+            throw "RealSense SDK install did not produce $expectedLib."
           }
 
       # -----------------------------------------------------------------
-      # Configure + build.
+      # Configure + build. Windows pinned to x64 VS generator (the SDK and
+      # OpenCV we installed are x64-only).
       # -----------------------------------------------------------------
-      - name: Configure
+      - name: Configure (Windows x64)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Configure (Linux / macOS)
+        if: runner.os != 'Windows'
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
