@@ -1,0 +1,402 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            label: linux-x86_64
+          # macos-13 (Intel) dropped — GitHub runner queue is unreliable.
+          - os: macos-14
+            label: macos-arm64
+          - os: windows-2022
+            label: windows-x86_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # -----------------------------------------------------------------
+      # Platform-specific dependency install (kept in sync with build.yml).
+      # -----------------------------------------------------------------
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates curl gnupg lsb-release \
+            build-essential cmake ninja-build pkg-config patchelf \
+            libopencv-dev \
+            libgl1-mesa-dev libglu1-mesa-dev \
+            libxinerama-dev libxcursor-dev libxi-dev libxrandr-dev \
+            libwayland-dev libxkbcommon-dev \
+            libusb-1.0-0-dev libudev-dev \
+            libgtk-3-dev
+
+          # See comment in build.yml — Intel's hosted key is stale, pull from keyserver over HTTP.
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xFB0B24895113F120&options=mr" \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/librealsense.gpg
+          sudo chmod 0644 /etc/apt/keyrings/librealsense.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/librealsense.gpg] https://librealsense.intel.com/Debian/apt-repo $(lsb_release -cs) main" \
+            | sudo tee /etc/apt/sources.list.d/librealsense.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends librealsense2-dev librealsense2-utils
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          set -euxo pipefail
+          brew update
+          brew install cmake ninja opencv librealsense dylibbundler
+
+      # See build.yml for rationale: the Intel SDK installer has no working
+      # silent flag, so librealsense comes from vcpkg, restaged into the
+      # path CMakeLists.txt hardcodes.
+      - name: Export GHA cache env (for vcpkg x-gha binary cache)
+        if: runner.os == 'Windows'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        timeout-minutes: 25
+        shell: pwsh
+        env:
+          VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          choco install opencv --version=4.10.0 -y --no-progress
+          $opencvDir = "C:\tools\opencv\build"
+          if (-not (Test-Path "$opencvDir\OpenCVConfig.cmake")) {
+            $opencvDir = Get-ChildItem -Path "C:\tools\opencv" -Recurse -Filter "OpenCVConfig.cmake" | Select-Object -First 1 -ExpandProperty Directory | Select-Object -ExpandProperty FullName
+          }
+          "OpenCV_DIR=$opencvDir"   | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$opencvDir\x64\vc16\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+          & "C:\vcpkg\vcpkg.exe" install realsense2:x64-windows --triplet=x64-windows
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install realsense2:x64-windows failed (exit $LASTEXITCODE)." }
+
+          $vcpkgInstalled = "C:\vcpkg\installed\x64-windows"
+          $vcpkgLib = "$vcpkgInstalled\lib\realsense2.lib"
+          $vcpkgDll = "$vcpkgInstalled\bin\realsense2.dll"
+          $vcpkgInc = "$vcpkgInstalled\include\librealsense2"
+          foreach ($p in @($vcpkgLib, $vcpkgDll, $vcpkgInc)) {
+            if (-not (Test-Path $p)) { throw "vcpkg did not produce $p" }
+          }
+
+          $intelDir = "C:\Program Files (x86)\Intel RealSense SDK 2.0"
+          New-Item -ItemType Directory -Force -Path "$intelDir\lib\x64", "$intelDir\bin\x64", "$intelDir\include" | Out-Null
+          Copy-Item $vcpkgLib -Destination "$intelDir\lib\x64\realsense2.lib" -Force
+          Copy-Item $vcpkgDll -Destination "$intelDir\bin\x64\realsense2.dll" -Force
+          Copy-Item $vcpkgInc -Destination "$intelDir\include\librealsense2" -Recurse -Force
+
+      # -----------------------------------------------------------------
+      # Configure + build. Windows pinned to x64 VS generator (the SDK and
+      # OpenCV we installed are x64-only).
+      # -----------------------------------------------------------------
+      - name: Configure (Windows x64)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Configure (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      # -----------------------------------------------------------------
+      # Package: produce a platform-native installer.
+      #   Linux   -> .deb (dpkg-deb, depends on system libgtk-3/libgl/libusb)
+      #   macOS   -> .dmg containing a self-contained .app bundle
+      #   Windows -> NSIS .exe installer (Start menu shortcut, Add/Remove entry)
+      # -----------------------------------------------------------------
+      - name: Derive version from tag
+        id: ver
+        shell: bash
+        run: |
+          # ref_name on a tag push is "v1.2.3" — strip leading 'v' to get "1.2.3".
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Releases triggered via workflow_dispatch / branch push won't have a v-tag;
+          # use a 0.0.0+sha fallback so the packaging step still works.
+          if [[ "$VERSION" == "$GITHUB_REF_NAME" && ! "$GITHUB_REF_NAME" =~ ^[0-9] ]]; then
+            VERSION="0.0.0-${GITHUB_SHA::7}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+
+      - name: Package (Linux .deb)
+        if: runner.os == 'Linux'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euxo pipefail
+          PKG="ir-tracking-app"
+          STAGE="$RUNNER_TEMP/deb-staging"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/lib/$PKG" \
+                   "$STAGE/usr/share/applications" "$STAGE/usr/share/icons/hicolor/256x256/apps"
+
+          # Binary + bundled libs under /usr/lib/<pkg>/ with $ORIGIN rpath.
+          cp build/ir-tracking-app "$STAGE/usr/lib/$PKG/"
+          ldd build/ir-tracking-app \
+            | awk '/(librealsense|libopencv|libtbb|libusb-1\.0)/ { print $3 }' \
+            | grep -v '^$' | sort -u \
+            | while read -r lib; do cp -L "$lib" "$STAGE/usr/lib/$PKG/"; done
+          patchelf --set-rpath '$ORIGIN' "$STAGE/usr/lib/$PKG/ir-tracking-app"
+
+          # Launcher shim on PATH.
+          cat > "$STAGE/usr/bin/$PKG" <<SH
+          #!/usr/bin/env bash
+          exec /usr/lib/$PKG/ir-tracking-app "\$@"
+          SH
+          chmod 0755 "$STAGE/usr/bin/$PKG"
+
+          # Desktop entry so the app shows in app launchers.
+          cat > "$STAGE/usr/share/applications/$PKG.desktop" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=IR Tracking App
+          Comment=Intel RealSense IR retro-reflective marker tracking
+          Exec=$PKG
+          Icon=$PKG
+          Categories=Science;Graphics;
+          Terminal=false
+          EOF
+
+          # dpkg control metadata. Depends covers the runtime system libs we
+          # rely on (GTK for nfd, OpenGL, libusb for RealSense USB).
+          INSTALLED_KB=$(du -sk "$STAGE" --exclude=DEBIAN | cut -f1)
+          cat > "$STAGE/DEBIAN/control" <<EOF
+          Package: $PKG
+          Version: $VERSION
+          Section: graphics
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Tianyu Song <tianyu@medivis.com>
+          Homepage: https://github.com/stytim/RealSense-ToolTracker
+          Depends: libgtk-3-0, libgl1, libusb-1.0-0
+          Installed-Size: $INSTALLED_KB
+          Description: Intel RealSense IR retro-reflective marker tool tracker
+           Tracks passive IR sphere markers from an Intel RealSense camera and
+           publishes the tool pose over UDP. See the GitHub README for usage.
+          EOF
+
+          OUT="${PKG}_${VERSION}_amd64.deb"
+          dpkg-deb --build --root-owner-group "$STAGE" "$OUT"
+          ls -lh "$OUT"
+          dpkg-deb -I "$OUT"
+
+      - name: Package (macOS .dmg)
+        if: runner.os == 'macOS'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euxo pipefail
+          APP_NAME="IR Tracking App"
+          APP_DIR="$RUNNER_TEMP/$APP_NAME.app"
+          rm -rf "$APP_DIR"
+          mkdir -p "$APP_DIR/Contents/MacOS" \
+                   "$APP_DIR/Contents/Resources" \
+                   "$APP_DIR/Contents/Frameworks"
+
+          cp build/ir-tracking-app "$APP_DIR/Contents/MacOS/"
+          cp resources/app_icon.icns "$APP_DIR/Contents/Resources/app_icon.icns"
+
+          # Bundle dylibs into Contents/Frameworks/, with install names rewritten
+          # to @executable_path/../Frameworks/ so the .app is self-contained.
+          dylibbundler -od -b \
+            -x "$APP_DIR/Contents/MacOS/ir-tracking-app" \
+            -d "$APP_DIR/Contents/Frameworks" \
+            -p "@executable_path/../Frameworks/" \
+            || true
+
+          cat > "$APP_DIR/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key><string>ir-tracking-app</string>
+              <key>CFBundleIdentifier</key><string>com.medivis.ir-tracking-app</string>
+              <key>CFBundleName</key><string>$APP_NAME</string>
+              <key>CFBundleDisplayName</key><string>$APP_NAME</string>
+              <key>CFBundleVersion</key><string>$VERSION</string>
+              <key>CFBundleShortVersionString</key><string>$VERSION</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleIconFile</key><string>app_icon.icns</string>
+              <key>LSMinimumSystemVersion</key><string>11.0</string>
+              <key>NSHighResolutionCapable</key><true/>
+              <key>NSCameraUsageDescription</key><string>Used to display the IR camera feed for tool tracking.</string>
+          </dict>
+          </plist>
+          EOF
+
+          # Compose the DMG. UDZO = zlib-compressed read-only.
+          DMG_NAME="ir-tracking-app-${VERSION}-${{ matrix.label }}.dmg"
+          DMG_STAGING="$RUNNER_TEMP/dmg-staging"
+          rm -rf "$DMG_STAGING"
+          mkdir -p "$DMG_STAGING"
+          cp -R "$APP_DIR" "$DMG_STAGING/"
+          # Drag-to-/Applications affordance — a symlink the user can drop on.
+          ln -s /Applications "$DMG_STAGING/Applications"
+
+          hdiutil create \
+            -volname "$APP_NAME $VERSION" \
+            -srcfolder "$DMG_STAGING" \
+            -ov \
+            -format UDZO \
+            "$DMG_NAME"
+          ls -lh "$DMG_NAME"
+
+      - name: Package (Windows .exe installer)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Stage every file that needs to end up in C:\Program Files\<App>\
+          $stage = "$env:RUNNER_TEMP\nsis-payload"
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          $exe = "build\Release\ir-tracking-app.exe"
+          if (-not (Test-Path $exe)) { $exe = "build\ir-tracking-app.exe" }
+          Copy-Item $exe -Destination $stage
+
+          Copy-Item "C:\Program Files (x86)\Intel RealSense SDK 2.0\bin\x64\realsense2.dll" -Destination $stage
+          $opencvBin = Join-Path $env:OpenCV_DIR "x64\vc16\bin"
+          Get-ChildItem -Path $opencvBin -Filter "opencv_world*.dll" `
+            | Where-Object { $_.Name -notmatch "d\.dll$" } `
+            | Copy-Item -Destination $stage
+
+          # NSIS comes preinstalled on windows-2022 runners under C:\Program Files (x86)\NSIS.
+          $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) {
+            choco install nsis -y --no-progress
+          }
+          if (-not (Test-Path $makensis)) {
+            throw "NSIS (makensis.exe) not found after install attempt."
+          }
+
+          $version = $env:VERSION
+          $outFile = "ir-tracking-app-$version-${{ matrix.label }}-setup.exe"
+          $nsiPath = "$env:RUNNER_TEMP\installer.nsi"
+          $stageNsi = $stage.Replace('\','\\')
+
+          # NSIS script — install to Program Files\IR Tracking App, Start Menu
+          # shortcut + uninstaller + Add/Remove Programs entry.
+          $nsi = @"
+          !define APPNAME "IR Tracking App"
+          !define APPID "ir-tracking-app"
+          !define VERSION "$version"
+          !define COMPANY "Medivis"
+          !define DESCRIPTION "Intel RealSense IR retro-reflective marker tool tracker"
+          !define REGKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\`${APPID}"
+
+          Name "`${APPNAME} `${VERSION}"
+          OutFile "$outFile"
+          Unicode true
+          InstallDir "`$PROGRAMFILES64\`${APPNAME}"
+          InstallDirRegKey HKLM "Software\`${APPNAME}" "InstallDir"
+          RequestExecutionLevel admin
+          ShowInstDetails show
+          ShowUninstDetails show
+
+          Page directory
+          Page instfiles
+          UninstPage uninstConfirm
+          UninstPage instfiles
+
+          Section "Install"
+              SetOutPath "`$INSTDIR"
+              File /r "$stageNsi\\*"
+
+              CreateDirectory "`$SMPROGRAMS\`${APPNAME}"
+              CreateShortcut  "`$SMPROGRAMS\`${APPNAME}\`${APPNAME}.lnk" "`$INSTDIR\ir-tracking-app.exe"
+              CreateShortcut  "`$SMPROGRAMS\`${APPNAME}\Uninstall.lnk"     "`$INSTDIR\Uninstall.exe"
+
+              WriteUninstaller "`$INSTDIR\Uninstall.exe"
+
+              WriteRegStr HKLM "Software\`${APPNAME}" "InstallDir" "`$INSTDIR"
+              WriteRegStr HKLM "`${REGKEY}" "DisplayName"     "`${APPNAME}"
+              WriteRegStr HKLM "`${REGKEY}" "DisplayVersion"  "`${VERSION}"
+              WriteRegStr HKLM "`${REGKEY}" "Publisher"       "`${COMPANY}"
+              WriteRegStr HKLM "`${REGKEY}" "DisplayIcon"     '"`$INSTDIR\ir-tracking-app.exe"'
+              WriteRegStr HKLM "`${REGKEY}" "UninstallString" '"`$INSTDIR\Uninstall.exe"'
+              WriteRegDWORD HKLM "`${REGKEY}" "NoModify" 1
+              WriteRegDWORD HKLM "`${REGKEY}" "NoRepair" 1
+          SectionEnd
+
+          Section "Uninstall"
+              Delete "`$INSTDIR\Uninstall.exe"
+              RMDir /r "`$INSTDIR"
+              Delete "`$SMPROGRAMS\`${APPNAME}\`${APPNAME}.lnk"
+              Delete "`$SMPROGRAMS\`${APPNAME}\Uninstall.lnk"
+              RMDir  "`$SMPROGRAMS\`${APPNAME}"
+              DeleteRegKey HKLM "`${REGKEY}"
+              DeleteRegKey HKLM "Software\`${APPNAME}"
+          SectionEnd
+          "@
+
+          Set-Content -Path $nsiPath -Value $nsi -Encoding UTF8
+          & $makensis $nsiPath
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed (exit $LASTEXITCODE)." }
+          Get-Item $outFile | Format-List Length, Name
+
+      # -----------------------------------------------------------------
+      # Upload the installer for the release job to collect.
+      # -----------------------------------------------------------------
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ir-tracking-app-${{ matrix.label }}
+          path: |
+            *.deb
+            *.dmg
+            *-setup.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

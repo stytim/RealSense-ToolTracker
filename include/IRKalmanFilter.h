@@ -52,14 +52,20 @@ private:
 		cv::Mat R = cv::Mat::eye(3, 3, CV_32F) * m_fMeasurementNoise; // measurement noise
 		m_filter.measurementNoiseCov = R;
 
-		// Initialize the state estimate (x) and the error covariance matrix (P)
-		cv::Mat x = cv::Mat::zeros(6, 1, CV_32F); // initial state is all zeros
+		// Seed position from the first measurement so the filter doesn't have
+		// to spend several frames pulling itself from (0,0,0) up to the marker.
+		// Velocity starts at zero — the next correct() will refine it.
+		cv::Mat x = cv::Mat::zeros(6, 1, CV_32F);
+		x.at<float>(0, 0) = value[0];
+		x.at<float>(1, 0) = value[1];
+		x.at<float>(2, 0) = value[2];
+
 		cv::Mat P = cv::Mat::eye(6, 6, CV_32F); // initial error covariance is identity matrix
 		m_filter.statePre = x;
+		m_filter.statePost = x.clone();
 		m_filter.errorCovPost = P;
 
 		m_bInitialized = true;
-		return;
 	}
 
 	cv::Mat measurement = cv::Mat(1, 3, CV_32F);
