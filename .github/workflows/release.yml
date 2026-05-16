@@ -302,7 +302,12 @@ jobs:
           }
 
           $version = $env:VERSION
-          $outFile = "ir-tracking-app-$version-${{ matrix.label }}-setup.exe"
+          # NSIS's OutFile is resolved relative to the .nsi file's directory,
+          # so use an absolute path anchored at the workspace root — that
+          # way the upload-artifact glob can find it.
+          $outFileName = "ir-tracking-app-$version-${{ matrix.label }}-setup.exe"
+          $outFileAbs  = Join-Path (Get-Location).Path $outFileName
+          $outFileNsi  = $outFileAbs.Replace('\','\\')
           $nsiPath = "$env:RUNNER_TEMP\installer.nsi"
           $stageNsi = $stage.Replace('\','\\')
 
@@ -317,7 +322,7 @@ jobs:
           !define REGKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\`${APPID}"
 
           Name "`${APPNAME} `${VERSION}"
-          OutFile "$outFile"
+          OutFile "$outFileNsi"
           Unicode true
           InstallDir "`$PROGRAMFILES64\`${APPNAME}"
           InstallDirRegKey HKLM "Software\`${APPNAME}" "InstallDir"
@@ -364,7 +369,7 @@ jobs:
           Set-Content -Path $nsiPath -Value $nsi -Encoding UTF8
           & $makensis $nsiPath
           if ($LASTEXITCODE -ne 0) { throw "makensis failed (exit $LASTEXITCODE)." }
-          Get-Item $outFile | Format-List Length, Name
+          Get-Item $outFileAbs | Format-List Length, Name
 
       # -----------------------------------------------------------------
       # Upload the installer for the release job to collect.
