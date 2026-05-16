@@ -19,8 +19,7 @@ jobs:
         include:
           - os: ubuntu-22.04
             label: linux-x86_64
-          - os: macos-13
-            label: macos-x86_64
+          # macos-13 (Intel) dropped — GitHub runner queue is unreliable.
           - os: macos-14
             label: macos-arm64
           - os: windows-2022
@@ -128,104 +127,256 @@ jobs:
         run: cmake --build build --config Release --parallel
 
       # -----------------------------------------------------------------
-      # Package: stage the binary plus its RealSense / OpenCV runtime
-      # libraries into dist/, then tar/zip it.
+      # Package: produce a platform-native installer.
+      #   Linux   -> .deb (dpkg-deb, depends on system libgtk-3/libgl/libusb)
+      #   macOS   -> .dmg containing a self-contained .app bundle
+      #   Windows -> NSIS .exe installer (Start menu shortcut, Add/Remove entry)
       # -----------------------------------------------------------------
-      - name: Package (Linux)
+      - name: Derive version from tag
+        id: ver
+        shell: bash
+        run: |
+          # ref_name on a tag push is "v1.2.3" — strip leading 'v' to get "1.2.3".
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Releases triggered via workflow_dispatch / branch push won't have a v-tag;
+          # use a 0.0.0+sha fallback so the packaging step still works.
+          if [[ "$VERSION" == "$GITHUB_REF_NAME" && ! "$GITHUB_REF_NAME" =~ ^[0-9] ]]; then
+            VERSION="0.0.0-${GITHUB_SHA::7}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+
+      - name: Package (Linux .deb)
         if: runner.os == 'Linux'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euxo pipefail
-          STAGE="dist/ir-tracking-app-${{ matrix.label }}"
-          mkdir -p "$STAGE/lib"
-          cp build/ir-tracking-app "$STAGE/"
+          PKG="ir-tracking-app"
+          STAGE="$RUNNER_TEMP/deb-staging"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/lib/$PKG" \
+                   "$STAGE/usr/share/applications" "$STAGE/usr/share/icons/hicolor/256x256/apps"
 
-          # Bundle every linked librealsense / libopencv .so. ldd reports a path
-          # like "libfoo.so => /usr/lib/x86_64-linux-gnu/libfoo.so.1 (0x...)"
+          # Binary + bundled libs under /usr/lib/<pkg>/ with $ORIGIN rpath.
+          cp build/ir-tracking-app "$STAGE/usr/lib/$PKG/"
           ldd build/ir-tracking-app \
             | awk '/(librealsense|libopencv|libtbb|libusb-1\.0)/ { print $3 }' \
-            | grep -v '^$' \
-            | sort -u \
-            | while read -r lib; do
-                cp -L "$lib" "$STAGE/lib/"
-              done
+            | grep -v '^$' | sort -u \
+            | while read -r lib; do cp -L "$lib" "$STAGE/usr/lib/$PKG/"; done
+          patchelf --set-rpath '$ORIGIN' "$STAGE/usr/lib/$PKG/ir-tracking-app"
 
-          patchelf --set-rpath '$ORIGIN/lib' "$STAGE/ir-tracking-app"
-
-          # Tiny launcher so users can double-click without worrying about
-          # LD_LIBRARY_PATH or working directory.
-          cat > "$STAGE/run.sh" <<'SH'
+          # Launcher shim on PATH.
+          cat > "$STAGE/usr/bin/$PKG" <<SH
           #!/usr/bin/env bash
-          cd "$(dirname "$0")"
-          exec ./ir-tracking-app "$@"
+          exec /usr/lib/$PKG/ir-tracking-app "\$@"
           SH
-          chmod +x "$STAGE/run.sh"
+          chmod 0755 "$STAGE/usr/bin/$PKG"
 
-          tar -czf "ir-tracking-app-${{ matrix.label }}.tar.gz" -C dist "ir-tracking-app-${{ matrix.label }}"
-          ls -lh "ir-tracking-app-${{ matrix.label }}.tar.gz"
+          # Desktop entry so the app shows in app launchers.
+          cat > "$STAGE/usr/share/applications/$PKG.desktop" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=IR Tracking App
+          Comment=Intel RealSense IR retro-reflective marker tracking
+          Exec=$PKG
+          Icon=$PKG
+          Categories=Science;Graphics;
+          Terminal=false
+          EOF
 
-      - name: Package (macOS)
+          # dpkg control metadata. Depends covers the runtime system libs we
+          # rely on (GTK for nfd, OpenGL, libusb for RealSense USB).
+          INSTALLED_KB=$(du -sk "$STAGE" --exclude=DEBIAN | cut -f1)
+          cat > "$STAGE/DEBIAN/control" <<EOF
+          Package: $PKG
+          Version: $VERSION
+          Section: graphics
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Tianyu Song <tianyu@medivis.com>
+          Homepage: https://github.com/stytim/RealSense-ToolTracker
+          Depends: libgtk-3-0, libgl1, libusb-1.0-0
+          Installed-Size: $INSTALLED_KB
+          Description: Intel RealSense IR retro-reflective marker tool tracker
+           Tracks passive IR sphere markers from an Intel RealSense camera and
+           publishes the tool pose over UDP. See the GitHub README for usage.
+          EOF
+
+          OUT="${PKG}_${VERSION}_amd64.deb"
+          dpkg-deb --build --root-owner-group "$STAGE" "$OUT"
+          ls -lh "$OUT"
+          dpkg-deb -I "$OUT"
+
+      - name: Package (macOS .dmg)
         if: runner.os == 'macOS'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euxo pipefail
-          STAGE="dist/ir-tracking-app-${{ matrix.label }}"
-          mkdir -p "$STAGE"
-          cp build/ir-tracking-app "$STAGE/"
+          APP_NAME="IR Tracking App"
+          APP_DIR="$RUNNER_TEMP/$APP_NAME.app"
+          rm -rf "$APP_DIR"
+          mkdir -p "$APP_DIR/Contents/MacOS" \
+                   "$APP_DIR/Contents/Resources" \
+                   "$APP_DIR/Contents/Frameworks"
 
-          # dylibbundler walks the binary's load commands recursively, copies
-          # every non-system dylib into dist/libs and rewrites install names to
-          # @executable_path/libs/. Avoids the per-dylib otool dance.
+          cp build/ir-tracking-app "$APP_DIR/Contents/MacOS/"
+          cp resources/app_icon.icns "$APP_DIR/Contents/Resources/app_icon.icns"
+
+          # Bundle dylibs into Contents/Frameworks/, with install names rewritten
+          # to @executable_path/../Frameworks/ so the .app is self-contained.
           dylibbundler -od -b \
-            -x "$STAGE/ir-tracking-app" \
-            -d "$STAGE/libs" \
-            -p "@executable_path/libs/" \
+            -x "$APP_DIR/Contents/MacOS/ir-tracking-app" \
+            -d "$APP_DIR/Contents/Frameworks" \
+            -p "@executable_path/../Frameworks/" \
             || true
 
-          # Cosmetic launcher mirrors the Linux one.
-          cat > "$STAGE/run.sh" <<'SH'
-          #!/usr/bin/env bash
-          cd "$(dirname "$0")"
-          exec ./ir-tracking-app "$@"
-          SH
-          chmod +x "$STAGE/run.sh"
+          cat > "$APP_DIR/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key><string>ir-tracking-app</string>
+              <key>CFBundleIdentifier</key><string>com.medivis.ir-tracking-app</string>
+              <key>CFBundleName</key><string>$APP_NAME</string>
+              <key>CFBundleDisplayName</key><string>$APP_NAME</string>
+              <key>CFBundleVersion</key><string>$VERSION</string>
+              <key>CFBundleShortVersionString</key><string>$VERSION</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleIconFile</key><string>app_icon.icns</string>
+              <key>LSMinimumSystemVersion</key><string>11.0</string>
+              <key>NSHighResolutionCapable</key><true/>
+              <key>NSCameraUsageDescription</key><string>Used to display the IR camera feed for tool tracking.</string>
+          </dict>
+          </plist>
+          EOF
 
-          tar -czf "ir-tracking-app-${{ matrix.label }}.tar.gz" -C dist "ir-tracking-app-${{ matrix.label }}"
-          ls -lh "ir-tracking-app-${{ matrix.label }}.tar.gz"
+          # Compose the DMG. UDZO = zlib-compressed read-only.
+          DMG_NAME="ir-tracking-app-${VERSION}-${{ matrix.label }}.dmg"
+          DMG_STAGING="$RUNNER_TEMP/dmg-staging"
+          rm -rf "$DMG_STAGING"
+          mkdir -p "$DMG_STAGING"
+          cp -R "$APP_DIR" "$DMG_STAGING/"
+          # Drag-to-/Applications affordance — a symlink the user can drop on.
+          ln -s /Applications "$DMG_STAGING/Applications"
 
-      - name: Package (Windows)
+          hdiutil create \
+            -volname "$APP_NAME $VERSION" \
+            -srcfolder "$DMG_STAGING" \
+            -ov \
+            -format UDZO \
+            "$DMG_NAME"
+          ls -lh "$DMG_NAME"
+
+      - name: Package (Windows .exe installer)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $stage = "dist\ir-tracking-app-${{ matrix.label }}"
+
+          # Stage every file that needs to end up in C:\Program Files\<App>\
+          $stage = "$env:RUNNER_TEMP\nsis-payload"
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
-          # The CMake build output landed under build\Release\.
           $exe = "build\Release\ir-tracking-app.exe"
-          if (-not (Test-Path $exe)) { $exe = "build\ir-tracking-app.exe" }  # if generator differs
+          if (-not (Test-Path $exe)) { $exe = "build\ir-tracking-app.exe" }
           Copy-Item $exe -Destination $stage
 
-          # RealSense runtime DLL.
           Copy-Item "C:\Program Files (x86)\Intel RealSense SDK 2.0\bin\x64\realsense2.dll" -Destination $stage
-
-          # OpenCV runtime DLL(s) — chocolatey 4.10 ships the 'world' variant.
           $opencvBin = Join-Path $env:OpenCV_DIR "x64\vc16\bin"
           Get-ChildItem -Path $opencvBin -Filter "opencv_world*.dll" `
             | Where-Object { $_.Name -notmatch "d\.dll$" } `
             | Copy-Item -Destination $stage
 
-          Compress-Archive -Path "$stage\*" -DestinationPath "ir-tracking-app-${{ matrix.label }}.zip" -Force
-          Get-Item "ir-tracking-app-${{ matrix.label }}.zip" | Format-List Length, Name
+          # NSIS comes preinstalled on windows-2022 runners under C:\Program Files (x86)\NSIS.
+          $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) {
+            choco install nsis -y --no-progress
+          }
+          if (-not (Test-Path $makensis)) {
+            throw "NSIS (makensis.exe) not found after install attempt."
+          }
+
+          $version = $env:VERSION
+          $outFile = "ir-tracking-app-$version-${{ matrix.label }}-setup.exe"
+          $nsiPath = "$env:RUNNER_TEMP\installer.nsi"
+          $stageNsi = $stage.Replace('\','\\')
+
+          # NSIS script — install to Program Files\IR Tracking App, Start Menu
+          # shortcut + uninstaller + Add/Remove Programs entry.
+          $nsi = @"
+          !define APPNAME "IR Tracking App"
+          !define APPID "ir-tracking-app"
+          !define VERSION "$version"
+          !define COMPANY "Medivis"
+          !define DESCRIPTION "Intel RealSense IR retro-reflective marker tool tracker"
+          !define REGKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\`${APPID}"
+
+          Name "`${APPNAME} `${VERSION}"
+          OutFile "$outFile"
+          Unicode true
+          InstallDir "`$PROGRAMFILES64\`${APPNAME}"
+          InstallDirRegKey HKLM "Software\`${APPNAME}" "InstallDir"
+          RequestExecutionLevel admin
+          ShowInstDetails show
+          ShowUninstDetails show
+
+          Page directory
+          Page instfiles
+          UninstPage uninstConfirm
+          UninstPage instfiles
+
+          Section "Install"
+              SetOutPath "`$INSTDIR"
+              File /r "$stageNsi\\*"
+
+              CreateDirectory "`$SMPROGRAMS\`${APPNAME}"
+              CreateShortcut  "`$SMPROGRAMS\`${APPNAME}\`${APPNAME}.lnk" "`$INSTDIR\ir-tracking-app.exe"
+              CreateShortcut  "`$SMPROGRAMS\`${APPNAME}\Uninstall.lnk"     "`$INSTDIR\Uninstall.exe"
+
+              WriteUninstaller "`$INSTDIR\Uninstall.exe"
+
+              WriteRegStr HKLM "Software\`${APPNAME}" "InstallDir" "`$INSTDIR"
+              WriteRegStr HKLM "`${REGKEY}" "DisplayName"     "`${APPNAME}"
+              WriteRegStr HKLM "`${REGKEY}" "DisplayVersion"  "`${VERSION}"
+              WriteRegStr HKLM "`${REGKEY}" "Publisher"       "`${COMPANY}"
+              WriteRegStr HKLM "`${REGKEY}" "DisplayIcon"     '"`$INSTDIR\ir-tracking-app.exe"'
+              WriteRegStr HKLM "`${REGKEY}" "UninstallString" '"`$INSTDIR\Uninstall.exe"'
+              WriteRegDWORD HKLM "`${REGKEY}" "NoModify" 1
+              WriteRegDWORD HKLM "`${REGKEY}" "NoRepair" 1
+          SectionEnd
+
+          Section "Uninstall"
+              Delete "`$INSTDIR\Uninstall.exe"
+              RMDir /r "`$INSTDIR"
+              Delete "`$SMPROGRAMS\`${APPNAME}\`${APPNAME}.lnk"
+              Delete "`$SMPROGRAMS\`${APPNAME}\Uninstall.lnk"
+              RMDir  "`$SMPROGRAMS\`${APPNAME}"
+              DeleteRegKey HKLM "`${REGKEY}"
+              DeleteRegKey HKLM "Software\`${APPNAME}"
+          SectionEnd
+          "@
+
+          Set-Content -Path $nsiPath -Value $nsi -Encoding UTF8
+          & $makensis $nsiPath
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed (exit $LASTEXITCODE)." }
+          Get-Item $outFile | Format-List Length, Name
 
       # -----------------------------------------------------------------
-      # Hand the archive off to the release job.
+      # Upload the installer for the release job to collect.
       # -----------------------------------------------------------------
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ir-tracking-app-${{ matrix.label }}
           path: |
-            ir-tracking-app-${{ matrix.label }}.tar.gz
-            ir-tracking-app-${{ matrix.label }}.zip
+            *.deb
+            *.dmg
+            *-setup.exe
           if-no-files-found: error
           retention-days: 7
 

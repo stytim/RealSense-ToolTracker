@@ -23,8 +23,9 @@ jobs:
         include:
           - os: ubuntu-22.04
             label: linux-x86_64
-          - os: macos-13
-            label: macos-x86_64
+          # macos-13 (Intel) is in GitHub's deprecation window — jobs sit in
+          # the queue for hours. Apple Silicon only for now; x86_64 Mac users
+          # build from source.
           - os: macos-14
             label: macos-arm64
           - os: windows-2022
@@ -72,9 +73,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends librealsense2-dev librealsense2-utils
 
       # -------------------------------------------------------------------
-      # macOS (both x86_64 and arm64): Homebrew handles everything.
-      # librealsense's arm64 brew bottle has been bumpy historically; if it
-      # breaks here, the most likely cause is upstream brew formula state.
+      # macOS (Apple Silicon, macos-14). Homebrew handles everything.
+      # If librealsense's brew formula breaks here, the most likely cause
+      # is upstream brew formula state.
       # -------------------------------------------------------------------
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
