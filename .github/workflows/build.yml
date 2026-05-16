@@ -16,6 +16,7 @@ jobs:
   build:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -89,6 +90,7 @@ jobs:
       # -------------------------------------------------------------------
       - name: Install Windows dependencies
         if: runner.os == 'Windows'
+        timeout-minutes: 25
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -120,24 +122,32 @@ jobs:
           $installPath = "C:\Program Files (x86)\Intel RealSense SDK 2.0"
           $expectedLib = "$installPath\lib\x64\realsense2.lib"
 
-          # The Windows installer packaging has changed between librealsense
-          # releases (InnoSetup -> NSIS -> InstallShield depending on the
-          # version), so try the common silent conventions in order and stop
-          # as soon as the expected library appears.
+          # The Intel SDK installer is InstallAware-based and the documented
+          # silent flag is lowercase '/s'. Older runs with /S hung the runner
+          # (it showed a GUI dialog) so we now enforce a hard per-attempt
+          # timeout — if the installer doesn't exit on its own, we kill the
+          # whole process tree and move to the next flag set.
           $flagSets = @(
-            @('/S'),
+            @('/s'),
             @('/silent'),
             @('/quiet'),
-            @('/s'),
+            @('/S'),
             @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-')
           )
+          $timeoutSeconds = 240  # 4 min cap per attempt
+
           foreach ($flags in $flagSets) {
             if (Test-Path $expectedLib) { break }
             Write-Host "Silent install attempt: $($flags -join ' ')"
-            $proc = Start-Process -FilePath $installer -ArgumentList $flags -Wait -PassThru
+            $proc = Start-Process -FilePath $installer -ArgumentList $flags -PassThru
+            $exited = $proc.WaitForExit($timeoutSeconds * 1000)
+            if (-not $exited) {
+              Write-Host "  installer hung after ${timeoutSeconds}s; killing process tree."
+              & taskkill.exe /F /T /PID $proc.Id 2>$null | Out-Null
+              Start-Sleep -Seconds 3
+              continue
+            }
             Write-Host "  exit code: $($proc.ExitCode)"
-            # Some installer wrappers exit before the real install finishes;
-            # poll the expected library path briefly.
             for ($i = 0; $i -lt 30; $i++) {
               if (Test-Path $expectedLib) { break }
               Start-Sleep -Seconds 1
@@ -152,9 +162,9 @@ jobs:
             } else {
               Write-Host "$installPath does not exist."
             }
-            Write-Host 'Searching C: for realsense2.lib (slow, last resort)...'
-            Get-ChildItem -Path 'C:\' -Filter realsense2.lib -Recurse -ErrorAction SilentlyContinue | Select-Object FullName
-            throw "RealSense SDK install did not produce $expectedLib."
+            Write-Host 'Top of installer (via 7zip list, informational only):'
+            & "C:\Program Files\7-Zip\7z.exe" l $installer 2>$null | Select-Object -First 40
+            throw "RealSense SDK install did not produce $expectedLib after all silent attempts."
           }
           Write-Host "RealSense SDK installed at $installPath."
 
