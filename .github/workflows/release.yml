@@ -286,7 +286,11 @@ jobs:
           if (-not (Test-Path $exe)) { $exe = "build\ir-tracking-app.exe" }
           Copy-Item $exe -Destination $stage
 
-          Copy-Item "C:\Program Files (x86)\Intel RealSense SDK 2.0\bin\x64\realsense2.dll" -Destination $stage
+          # Pull realsense2.dll and its vcpkg transitive deps (lz4.dll, etc.)
+          # straight from vcpkg's bin/ — the Intel-SDK restage dir only has
+          # realsense2.dll itself, which leaves the app missing lz4.dll at runtime.
+          $vcpkgBin = "C:\vcpkg\installed\x64-windows\bin"
+          Get-ChildItem -Path $vcpkgBin -Filter "*.dll" | Copy-Item -Destination $stage
           $opencvBin = Join-Path $env:OpenCV_DIR "x64\vc16\bin"
           Get-ChildItem -Path $opencvBin -Filter "opencv_world*.dll" `
             | Where-Object { $_.Name -notmatch "d\.dll$" } `
