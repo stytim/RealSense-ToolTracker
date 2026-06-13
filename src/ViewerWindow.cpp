@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
@@ -16,6 +17,7 @@
 
 #include "ViewerWindow.h"
 #include "ROMParser.h"
+#include "Log.h"
 
 #include "AppIcon.inc"
 #define STB_IMAGE_IMPLEMENTATION
@@ -24,15 +26,49 @@
 
 namespace fs = std::filesystem;
 
+// Height (px) reserved for the docked log console along the bottom edge of the
+// window. The IR/Depth monitors are lifted by this amount so they never sit
+// under it.
+static constexpr float kLogConsoleHeight = 170.0f;
+
 double GetCurrentUnixTimestamp() {
     auto now = std::chrono::system_clock::now();
     auto duration = now.time_since_epoch();
     return std::chrono::duration<double>(duration).count();
 }
 
+// Base directory for app-managed data (tool definitions under Tools/, recorded
+// CSVs). On macOS the app runs as a .app bundle whose working directory is "/",
+// so relative paths like "Tools" would resolve under root and silently fail to
+// load/save. Use a stable per-user location instead, so it behaves the same
+// whether launched from Finder or a terminal. On Windows and Linux the working
+// directory is kept unchanged (paths stay relative to ".").
+static fs::path GetDataDirectory()
+{
+#if defined(__APPLE__)
+    if (const char* home = std::getenv("HOME"); home && *home)
+    {
+        fs::path dir = fs::path(home) / "Library" / "Application Support" / "IR Tracking App";
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        if (ec)
+        {
+            // Don't fall back to "." here: launched from Finder the working
+            // directory is "/", so that would reintroduce the very problem this
+            // helper exists to avoid. Log why and return the per-user path
+            // anyway, so subsequent file operations fail in an actionable place.
+            std::cerr << "Failed to create data directory " << dir.string()
+                      << ": " << ec.message() << std::endl;
+        }
+        return dir;
+    }
+#endif
+    return fs::path(".");
+}
+
 void ViewerWindow::SaveToolDefinition(const Tool &tool)
 {
-    fs::path toolsDir("Tools");
+    fs::path toolsDir = GetDataDirectory() / "Tools";
     if (!fs::exists(toolsDir))
     {
         fs::create_directories(toolsDir); // Create the Tools directory if it doesn't exist
@@ -60,7 +96,7 @@ void ViewerWindow::SaveToolDefinition(const Tool &tool)
 
 bool ViewerWindow::LoadToolDefinition()
 {
-    fs::path toolDir("Tools");
+    fs::path toolDir = GetDataDirectory() / "Tools";
     if (!fs::exists(toolDir) || !fs::is_directory(toolDir))
     {
         std::cerr << "Tool directory not found." << std::endl;
@@ -156,12 +192,17 @@ void ViewerWindow::Initialize(const std::string& file) {
         //glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);            // 3.0+ only
     #endif
 
-    window = glfwCreateWindow( 1060, 720, "RealSense Tool Tracker", nullptr, nullptr );
+    window = glfwCreateWindow( 1060, 900, "RealSense Tool Tracker", nullptr, nullptr );
     if (window == nullptr)
     {
         std::cerr <<"glfwCreateWindow failed" << std::endl;
         return;
     }
+
+    // Keep the window large enough for the fixed-height docked log console and
+    // the monitor panels. Below this the log console's pinned Y (windowHeight -
+    // kLogConsoleHeight) would go negative and the panels would overlap.
+    glfwSetWindowSizeLimits(window, 940, 600, GLFW_DONT_CARE, GLFW_DONT_CARE);
 
     GLFWimage icon;
     icon.pixels = stbi_load_from_memory(
@@ -189,11 +230,12 @@ void ViewerWindow::Initialize(const std::string& file) {
         glfwSetWindowShouldClose(window, GL_TRUE); 
     });
 
+    std::cout << "Data directory: " << GetDataDirectory().string() << std::endl;
     LoadToolDefinition();
     tracker.RemoveAllToolDefinitions();
 
     Terminated = false;
-    Render(); 
+    Render();
 }
 
 Eigen::Matrix4f ViewerWindow::TrackingDataToMatrix(const TrackingData& data)
@@ -427,8 +469,11 @@ void ViewerWindow::UdpThreadFunction()
                 {
                     // Value-initialize so no uninitialized padding goes on the wire.
                     TrackingData data{};
-                    std::copy(tool_transform.begin(), tool_transform.begin() + 3, data.position); 
-                    std::copy(tool_transform.begin() + 3, tool_transform.end(), data.quaternion); 
+                    std::copy(tool_transform.begin(), tool_transform.begin() + 3, data.position);
+                    // GetToolTransform() returns 8 floats (XYZ, quaternion XYZW, visibility).
+                    // Copy only the 4 quaternion components — copying through end() would
+                    // write a 5th float past data.quaternion[4].
+                    std::copy(tool_transform.begin() + 3, tool_transform.begin() + 7, data.quaternion);
                     data.toolId = static_cast<int>(id) + 1;                                        
                     data.timestamp = GetCurrentUnixTimestamp();
                     data.serialNumber = serialNumber;
@@ -457,8 +502,14 @@ void ViewerWindow::UdpThreadFunction()
 
 void ViewerWindow::WriteToCSV()
 {
-    // Check if csvFileName exists, if so, add a number to the end of the filename
+    // Check if csvFileName exists, if so, add a number to the end of the filename.
+    // A bare default filename is anchored to the app data directory; an absolute
+    // path chosen via the "Save To" dialog is used as-is.
     fs::path basePath(csvFileName);
+    if (basePath.is_relative())
+    {
+        basePath = GetDataDirectory() / basePath;
+    }
     std::string stem = basePath.stem().string();
     std::string extension = basePath.extension().string();
     int count = 1;
@@ -994,7 +1045,12 @@ void ViewerWindow::Render() {
             int windowWidth, windowHeight;
             glfwGetWindowSize(window, &windowWidth, &windowHeight);
 
-            ImGui::SetNextWindowPos(ImVec2(20, windowHeight - 300));
+            // Sit above the docked log console rather than under it, but never
+            // off the top of the window if it has been resized very short.
+            const float monitorY = std::max(0.0f,
+                static_cast<float>(windowHeight) - 300.0f - kLogConsoleHeight);
+
+            ImGui::SetNextWindowPos(ImVec2(20, monitorY));
             ImGui::Begin("IR Monitor", nullptr, overlayFlags);
             glBindTexture(GL_TEXTURE_2D, texture);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1004,7 +1060,7 @@ void ViewerWindow::Render() {
             ImGui::Image(reinterpret_cast<void *>(static_cast<intptr_t>(texture)), ImVec2(424, 240));
             ImGui::End();
 
-            ImGui::SetNextWindowPos(ImVec2(480, windowHeight - 300));
+            ImGui::SetNextWindowPos(ImVec2(480, monitorY));
             ImGui::Begin("Depth Monitor", nullptr, overlayFlags);
             glBindTexture(GL_TEXTURE_2D, dtexture);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1094,6 +1150,23 @@ void ViewerWindow::Render() {
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndPopup();
+        }
+
+        // Docked log console along the bottom edge: always visible, full width,
+        // and re-pinned every frame so it tracks live window resizes.
+        {
+            int logWinWidth = 0, logWinHeight = 0;
+            glfwGetWindowSize(window, &logWinWidth, &logWinHeight);
+            const ImGuiWindowFlags logFlags =
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoFocusOnAppearing;
+            ImGui::SetNextWindowPos(ImVec2(0.0f,
+                std::max(0.0f, static_cast<float>(logWinHeight) - kLogConsoleHeight)));
+            ImGui::SetNextWindowSize(ImVec2(static_cast<float>(logWinWidth), kLogConsoleHeight));
+            ImGui::Begin("Log", nullptr, logFlags);
+            LogConsole::Get().DrawContents();
+            ImGui::End();
         }
 
         ImGui::Render();

@@ -85,7 +85,8 @@ target_link_libraries(IRToolTracking PUBLIC Eigen3 ${realsense2_LIBRARY} opencv_
 
 
 
-#set(MACOS_ICON "resources/app_icon.icns")
+set(MACOS_ICON_NAME "app_icon.icns")
+set(MACOS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/${MACOS_ICON_NAME}")
 
 
 find_package(OpenGL REQUIRED)
@@ -95,25 +96,56 @@ include_directories(
 )
 
 set(VIEWER_SOURCE_FILES
-    #${MACOS_ICON}
     win.rc
     include/ROMParser.h
     include/ViewerWindow.h
+    include/Log.h
     src/ViewerWindow.cpp
     src/viewer_main.cpp
+    src/Log.cpp
 )
+
+# On macOS the app icon is compiled into the .app bundle's Resources folder.
+if(APPLE)
+    list(APPEND VIEWER_SOURCE_FILES ${MACOS_ICON})
+endif()
 
 # Add the main application
 add_executable(ir-tracking-app  ${VIEWER_SOURCE_FILES})
 
-# if(APPLE)
-#     set_target_properties(ir-tracking-app PROPERTIES
-#                             MACOSX_BUNDLE TRUE
-#                             MACOSX_BUNDLE_ICON_FILE app_icon.icns
-#                             RESOURCE "${MACOS_ICON}"
-#                             )
-#     set_source_files_properties(${MACOS_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
-# endif()
+# -----------------------------------------------------------------------------
+# Windowing / launch behavior: don't pop a separate console (CMD / Terminal)
+# window when the app is launched from a GUI.
+# -----------------------------------------------------------------------------
+if(WIN32)
+    # Build as a GUI-subsystem (/SUBSYSTEM:WINDOWS) executable so launching from
+    # Explorer or a Start-menu shortcut no longer spawns a CMD window. Keep the
+    # standard int main(...) entry point instead of WinMain by pointing the
+    # linker at the console CRT startup, which calls main(). The app still
+    # AttachConsole()s to a parent terminal at runtime so `ir-tracking-app.exe`
+    # launched from cmd/PowerShell keeps printing logs.
+    set_target_properties(ir-tracking-app PROPERTIES WIN32_EXECUTABLE TRUE)
+    if(MSVC)
+        target_link_options(ir-tracking-app PRIVATE /ENTRY:mainCRTStartup)
+    endif()
+endif()
+
+if(APPLE)
+    # Build a .app bundle so double-clicking it in Finder does not open a
+    # Terminal window (a bare Unix executable would). Logs still go to the
+    # terminal when the inner binary is run from a shell, and always to the
+    # in-app log console.
+    set_source_files_properties(${MACOS_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+    set_target_properties(ir-tracking-app PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resources/Info.plist.in"
+        MACOSX_BUNDLE_BUNDLE_NAME "IR Tracking App"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.medivis.ir-tracking-app"
+        MACOSX_BUNDLE_ICON_FILE "${MACOS_ICON_NAME}"
+        MACOSX_BUNDLE_BUNDLE_VERSION "0.0.0"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "0.0.0"
+    )
+endif()
 
 include_directories( ${IMGUI_DIR} )
 include_directories( ${IMGUI_DIR}/backends)
