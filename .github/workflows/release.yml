@@ -215,14 +215,16 @@ jobs:
         run: |
           set -euxo pipefail
           APP_NAME="IR Tracking App"
+
+          # CMake now emits the .app bundle directly (Info.plist + icon already
+          # baked in). Self-contain it with dylibbundler and stamp the version.
+          BUILT_APP="build/ir-tracking-app.app"
+          test -d "$BUILT_APP" || { echo "Expected $BUILT_APP from the CMake build"; exit 1; }
+
           APP_DIR="$RUNNER_TEMP/$APP_NAME.app"
           rm -rf "$APP_DIR"
-          mkdir -p "$APP_DIR/Contents/MacOS" \
-                   "$APP_DIR/Contents/Resources" \
-                   "$APP_DIR/Contents/Frameworks"
-
-          cp build/ir-tracking-app "$APP_DIR/Contents/MacOS/"
-          cp resources/app_icon.icns "$APP_DIR/Contents/Resources/app_icon.icns"
+          cp -R "$BUILT_APP" "$APP_DIR"
+          mkdir -p "$APP_DIR/Contents/Frameworks"
 
           # Bundle dylibs into Contents/Frameworks/, with install names rewritten
           # to @executable_path/../Frameworks/ so the .app is self-contained.
@@ -232,25 +234,10 @@ jobs:
             -p "@executable_path/../Frameworks/" \
             || true
 
-          cat > "$APP_DIR/Contents/Info.plist" <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleExecutable</key><string>ir-tracking-app</string>
-              <key>CFBundleIdentifier</key><string>com.medivis.ir-tracking-app</string>
-              <key>CFBundleName</key><string>$APP_NAME</string>
-              <key>CFBundleDisplayName</key><string>$APP_NAME</string>
-              <key>CFBundleVersion</key><string>$VERSION</string>
-              <key>CFBundleShortVersionString</key><string>$VERSION</string>
-              <key>CFBundlePackageType</key><string>APPL</string>
-              <key>CFBundleIconFile</key><string>app_icon.icns</string>
-              <key>LSMinimumSystemVersion</key><string>11.0</string>
-              <key>NSHighResolutionCapable</key><true/>
-              <key>NSCameraUsageDescription</key><string>Used to display the IR camera feed for tool tracking.</string>
-          </dict>
-          </plist>
-          EOF
+          # Stamp the release version into the CMake-generated Info.plist.
+          PLIST="$APP_DIR/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
 
           # Compose the DMG. UDZO = zlib-compressed read-only.
           DMG_NAME="ir-tracking-app-${VERSION}-${{ matrix.label }}.dmg"

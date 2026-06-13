@@ -45,15 +45,36 @@ Note: I have only tested this build process with Visual Studio 2022.
 
 ## Running
 
+The application no longer opens a separate console window when launched from a
+GUI (a CMD window on Windows or a Terminal window on macOS). Instead, all log
+output is shown in a **Log console docked along the bottom of the app window**.
+When you launch the app from a terminal, the same logs are also printed to that
+terminal.
+
 ### For Linux and Windows:
 ```bash
 ./ir-tracking-app
 ```
+On Windows the app is now a GUI-subsystem executable, so double-clicking it (or
+its Start-menu shortcut) does not spawn a CMD window. Run it from `cmd` /
+PowerShell if you want the logs in your terminal as well.
+
 ### For MacOS
-Due to certain permissions and security features in MacOS, you might need to run the application with elevated privileges.
+The build now produces an `ir-tracking-app.app` bundle, so you can launch it
+from Finder without a Terminal window appearing:
 ```bash
-sudo ./ir-tracking-app
+open build/ir-tracking-app.app
 ```
+To see the logs in your terminal as well (and to run with elevated privileges
+for camera/USB access), run the binary inside the bundle directly:
+```bash
+sudo ./build/ir-tracking-app.app/Contents/MacOS/ir-tracking-app
+```
+> Note: on macOS, tool definitions (`Tools/`) and recorded CSV files are stored
+> under `~/Library/Application Support/IR Tracking App/` regardless of how the
+> app is launched (the data directory is also printed to the log console at
+> startup). On Windows and Linux these are read/written relative to the current
+> working directory, as before.
 ## RealSense Camera Modification: Adding a Light Diffuser
 
 The laser projector of the RealSense camera emits a sharp, focused IR dot pattern. While this is generally beneficial for depth sensing, it is not ideal for doing thresholding on IR stream to find retroreflective surfaces.

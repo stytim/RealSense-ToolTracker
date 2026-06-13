@@ -61,7 +61,7 @@ private:
 
     // Validation bounds.
     static constexpr int MAX_TOOLS = 32;          // upper bound for "Number of Tools"
-    static constexpr int MIN_SPHERES = 4;         // lower bound for spheres per tool
+    static constexpr int MIN_SPHERES = 3;         // lower bound for spheres per tool (matches the tracker's 3-sphere minimum)
     static constexpr int MAX_SPHERES = 20;        // safety cap for manual entry / ROM
     static constexpr int MAX_CALIB_SPHERES = 6;   // a calibration must not exceed this
 
