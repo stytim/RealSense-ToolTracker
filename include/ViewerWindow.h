@@ -24,6 +24,10 @@ class ViewerWindow {
 public:
     void Initialize(const std::string& file);
     void Shutdown();
+    // Make destruction safe regardless of how Render()/main() unwound: stop every
+    // worker and join it, so no joinable std::thread is ever destroyed (which would
+    // call std::terminate()).
+    ~ViewerWindow() { Shutdown(); }
 
     bool IsTerminated() const
     {
@@ -43,9 +47,23 @@ private:
 
     bool Connect(NanoSocket& _socket, NanoAddress& address, const char* host, int port, bool& _connected);
     void Disconnect(NanoSocket& _socket, bool& _connected);
+    // Reference-counted nanosockets init/deinit so the library is initialized exactly
+    // once while one or more channels (send/receive) are active.
+    bool EnsureSocketInit();
+    void ReleaseSocketInit();
+
+    // Thread-safe snapshot of the current tool names, so worker threads never index the
+    // GUI-owned `tools` vector while it is being resized/edited on the GUI thread.
+    std::vector<std::string> SnapshotToolNames();
 
     void GetSerialNumber();
     Eigen::Matrix4f TrackingDataToMatrix(const TrackingData &data);
+
+    // Validation bounds.
+    static constexpr int MAX_TOOLS = 32;          // upper bound for "Number of Tools"
+    static constexpr int MIN_SPHERES = 4;         // lower bound for spheres per tool
+    static constexpr int MAX_SPHERES = 20;        // safety cap for manual entry / ROM
+    static constexpr int MAX_CALIB_SPHERES = 6;   // a calibration must not exceed this
 
 
     std::atomic<bool> Terminated = ATOMIC_VAR_INIT(false);
@@ -66,8 +84,14 @@ private:
     GLFWwindow* window = nullptr;
     GLuint texture = 0, dtexture = 0;
     std::vector<Tool> tools;
+    // Guards `tools` (resized/edited by the GUI thread, read by UDP/CSV worker threads).
+    std::mutex toolsMutex;
     std::map<int, Eigen::Matrix4f> toolTransforms;
     std::mutex secondaryDataMutex;
+
+    // Set when a calibration produced an invalid result (too many spheres / NaN /
+    // no data); triggers the "Tool calibration unsuccessful" popup on the next frame.
+    bool showCalibrationError = false;
 
     int numTools = 0; // Default number of tools
     std::string toolName = "Tool1"; // Default tool name
@@ -96,8 +120,11 @@ private:
     NanoSocket receiveSocket;
     NanoAddress sendAddress = {};
     NanoAddress receiveAddress = {};
-    bool m_connected;
-    bool m_receiveconnected;
+    bool m_connected = false;
+    bool m_receiveconnected = false;
+    // Reference count + guard for nanosockets_initialize()/deinitialize().
+    std::mutex socketInitMutex;
+    int socketInitCount = 0;
     char ipAddress[16] = "127.0.0.1"; 
     int m_port = 12345;
     int m_receiveport = 12345;

@@ -6,6 +6,8 @@
 #include <fstream>
 #include <regex>
 #include <iomanip>
+#include <algorithm>
+#include <cmath>
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
@@ -70,30 +72,46 @@ bool ViewerWindow::LoadToolDefinition()
     {
         if (entry.path().extension() == ".json")
         {
-            std::ifstream file(entry.path());
-            if (!file)
+            // Parse defensively: a malformed or hand-edited file must be skipped, not
+            // crash startup. nlohmann throws on parse errors / missing keys / type
+            // mismatches; catch per-file so one bad file doesn't take down the rest.
+            try
             {
-                std::cerr << "Failed to open " << entry.path() << std::endl;
+                std::ifstream file(entry.path());
+                if (!file)
+                {
+                    std::cerr << "Failed to open " << entry.path() << std::endl;
+                    continue;
+                }
+
+                nlohmann::json toolJson;
+                file >> toolJson;
+
+                Tool tool;
+                tool.numSpheres = toolJson.at("numSpheres").get<int>();
+                tool.spherePositions = toolJson.at("spherePositions").get<std::vector<float>>();
+                tool.sphereRadius = toolJson.at("sphereRadius").get<float>();
+                tool.toolName = toolJson.at("toolName").get<std::string>();
+
+                // Reject inconsistent definitions (huge/negative counts, mismatched
+                // arrays, non-finite radius) before they reach any resize/indexing.
+                if (tool.numSpheres < MIN_SPHERES || tool.numSpheres > MAX_SPHERES ||
+                    tool.spherePositions.size() != static_cast<size_t>(tool.numSpheres) * 3 ||
+                    !std::isfinite(tool.sphereRadius) || tool.sphereRadius <= 0.f)
+                {
+                    std::cerr << "Skipping invalid tool definition: " << entry.path() << std::endl;
+                    continue;
+                }
+
+                std::cout << "Loaded tool definition: " << tool.toolName << std::endl;
+                tools.push_back(std::move(tool));
+                numTools += 1;
+            }
+            catch (const std::exception &e)
+            {
+                std::cerr << "Failed to parse " << entry.path() << ": " << e.what() << std::endl;
                 continue;
             }
-
-            nlohmann::json toolJson;
-            file >> toolJson;
-
-            Tool tool;
-            tool.numSpheres = toolJson["numSpheres"].get<int>();
-            tool.spherePositions = toolJson["spherePositions"].get<std::vector<float>>();
-            tool.sphereRadius = toolJson["sphereRadius"].get<float>();
-            tool.toolName = toolJson["toolName"].get<std::string>();
-
-            if (!file)
-            {
-                std::cerr << "Failed to read data from " << entry.path() << std::endl;
-                continue;
-            }
-            std::cout << "Loaded tool definition: " << tool.toolName << std::endl;
-            tools.push_back(std::move(tool));
-            numTools += 1;
         }
     }
 
@@ -188,24 +206,41 @@ Eigen::Matrix4f ViewerWindow::TrackingDataToMatrix(const TrackingData& data)
     return matrix;
 }
 
-bool ViewerWindow::Connect(NanoSocket& _socket, NanoAddress& address, const char *host, int port, bool& _connected) {
-    if (udpEnabled != multiEnabled)
+bool ViewerWindow::EnsureSocketInit()
+{
+    std::lock_guard<std::mutex> lock(socketInitMutex);
+    if (socketInitCount == 0)
     {
-        if (nanosockets_initialize())
+        if (nanosockets_initialize()) // non-zero == failure
         {
-            std::cerr << "Error initializing socket library" << std::endl;
             return false;
         }
+    }
+    ++socketInitCount;
+    return true;
+}
+
+void ViewerWindow::ReleaseSocketInit()
+{
+    std::lock_guard<std::mutex> lock(socketInitMutex);
+    if (socketInitCount > 0 && --socketInitCount == 0)
+    {
+        nanosockets_deinitialize();
+    }
+}
+
+bool ViewerWindow::Connect(NanoSocket& _socket, NanoAddress& address, const char *host, int port, bool& _connected) {
+    if (!EnsureSocketInit())
+    {
+        std::cerr << "Error initializing socket library" << std::endl;
+        return false;
     }
 
     _socket = nanosockets_create(1024, 1024);
     if (_socket < 0)
     {
         std::cerr << "Failed to create a socket." << std::endl;
-        if (!multiEnabled && !udpEnabled)
-        {
-            nanosockets_deinitialize();
-        }
+        ReleaseSocketInit();
         return false;
     }
 
@@ -217,10 +252,7 @@ bool ViewerWindow::Connect(NanoSocket& _socket, NanoAddress& address, const char
         {
             std::cerr<<"Error setting default address"<<std::endl;
             nanosockets_destroy(&_socket);
-            if (!multiEnabled && !udpEnabled)
-            {
-                nanosockets_deinitialize();
-            }
+            ReleaseSocketInit();
             return false;
         }
     }
@@ -230,10 +262,7 @@ bool ViewerWindow::Connect(NanoSocket& _socket, NanoAddress& address, const char
         {
             std::cerr << "Error setting hostname to " << host << std::endl;
             nanosockets_destroy(&_socket);
-            if (!multiEnabled && !udpEnabled)
-            {
-                nanosockets_deinitialize();
-            }
+            ReleaseSocketInit();
             return false;
         }
     }
@@ -247,12 +276,21 @@ void ViewerWindow::Disconnect(NanoSocket& _socket, bool& _connected)
     if (_connected)
     {
         nanosockets_destroy(&_socket);
-        if (!multiEnabled && !udpEnabled)
-        {
-            nanosockets_deinitialize();
-        }
+        ReleaseSocketInit();
         _connected = false;
     }
+}
+
+std::vector<std::string> ViewerWindow::SnapshotToolNames()
+{
+    std::lock_guard<std::mutex> lock(toolsMutex);
+    std::vector<std::string> names;
+    names.reserve(tools.size());
+    for (const auto &t : tools)
+    {
+        names.push_back(t.toolName);
+    }
+    return names;
 }
 
 void ViewerWindow::UdpReceiveThreadFunction()
@@ -292,7 +330,10 @@ void ViewerWindow::UdpReceiveThreadFunction()
         }
 
         NanoAddress sender;
-        if (nanosockets_receive(receiveSocket, &sender, buffer.data(), buffer.size()) > 0)
+        const int received = nanosockets_receive(receiveSocket, &sender, buffer.data(), buffer.size());
+        // Only accept a datagram that is exactly one TrackingData; a truncated or
+        // oversized packet must not be reinterpreted as a valid struct.
+        if (received == static_cast<int>(sizeof(TrackingData)))
         {
 			TrackingData data;
 			std::memcpy(&data, buffer.data(), sizeof(TrackingData));
@@ -304,12 +345,13 @@ void ViewerWindow::UdpReceiveThreadFunction()
 
             if (tracker.IsTrackingTools())
             {
-                for (size_t id = 0; id < tools.size(); ++id)
+                std::vector<std::string> toolNames = SnapshotToolNames();
+                for (size_t id = 0; id < toolNames.size(); ++id)
                 {
                     if (data.toolId == static_cast<int>(id + 1))
                     {
                         // Always update extrinsics in case camera is moved
-                        std::vector<float> tool_transform = tracker.GetToolTransform(tools[id].toolName);
+                        std::vector<float> tool_transform = tracker.GetToolTransform(toolNames[id]);
                         if (!tool_transform.empty() && !std::isnan(tool_transform[0]) && tool_transform[7] != 0)
                         {
                             // tool_transform to matrix
@@ -357,10 +399,10 @@ void ViewerWindow::UdpThreadFunction()
     {
         if (tracker.IsTrackingTools())
         {
-            for (size_t id = 0; id < tools.size(); ++id)
+            std::vector<std::string> toolNames = SnapshotToolNames();
+            for (size_t id = 0; id < toolNames.size(); ++id)
             {
-                const auto &tool = tools[id];
-                std::vector<float> tool_transform = tracker.GetToolTransform(tool.toolName);
+                std::vector<float> tool_transform = tracker.GetToolTransform(toolNames[id]);
 
                 bool validPrimaryData = !tool_transform.empty() && !std::isnan(tool_transform[0]) && tool_transform[7] != 0;
 
@@ -375,14 +417,16 @@ void ViewerWindow::UdpThreadFunction()
                         tool_transform = { secondaryData(0, 3), secondaryData(1, 3), secondaryData(2, 3),
                                           q.x(), q.y(), q.z(), q.w() };
 
-                        toolTransforms.clear();
+                        // Consume only this tool's entry, not the whole map.
+                        toolTransforms.erase(id);
                         validSecondaryData = true;
                     }
                 }
 
                 if (validPrimaryData || validSecondaryData)
                 {
-                    TrackingData data;
+                    // Value-initialize so no uninitialized padding goes on the wire.
+                    TrackingData data{};
                     std::copy(tool_transform.begin(), tool_transform.begin() + 3, data.position); 
                     std::copy(tool_transform.begin() + 3, tool_transform.end(), data.quaternion); 
                     data.toolId = static_cast<int>(id) + 1;                                        
@@ -457,10 +501,10 @@ void ViewerWindow::WriteToCSV()
                     break; // Exit loop
                 }
             }
-            for (size_t id = 0; id < tools.size(); ++id)
+            std::vector<std::string> toolNames = SnapshotToolNames();
+            for (size_t id = 0; id < toolNames.size(); ++id)
             {
-                const auto& tool = tools[id];
-                std::vector<float> tool_transform = tracker.GetToolTransform(tool.toolName);
+                std::vector<float> tool_transform = tracker.GetToolTransform(toolNames[id]);
                 if (!tool_transform.empty() && !std::isnan(tool_transform[0]) && tool_transform[7] != 0)
                 {
                     double unixTimestamp = GetCurrentUnixTimestamp();
@@ -577,8 +621,14 @@ void ViewerWindow::Render() {
         ImGui::InputInt("Number of Tools", &numTools);
         ImGui::End();
 
-        // Adjust the size of the tools vector based on numTools
-        numTools = std::max(numTools, 1);
+        // Hold toolsMutex while we resize/edit `tools` so the UDP/CSV worker threads
+        // never index it mid-modification. Released right after the calibration-result
+        // block below.
+        std::unique_lock<std::mutex> toolsLock(toolsMutex);
+
+        // Adjust the size of the tools vector based on numTools. Clamp to a sane range:
+        // an unbounded value from the InputInt would make tools.resize() allocate wildly.
+        numTools = std::clamp(numTools, 1, MAX_TOOLS);
         if (static_cast<int>(tools.size()) > numTools)
         {
             // Unregister any tools that are about to be dropped so the tracker
@@ -617,8 +667,8 @@ void ViewerWindow::Render() {
                 tmpName[MAX_TOOL_NAME_LENGTH - 1] = '\0'; // Ensure null-termination
                 ImGui::InputText(("Tool Name##" + std::to_string(toolIdx)).c_str(), tmpName, MAX_TOOL_NAME_LENGTH);
                 tools[toolIdx].toolName = tmpName;
-                tools[toolIdx].numSpheres = std::max(tools[toolIdx].numSpheres, 4);
-                tools[toolIdx].spherePositions.resize(tools[toolIdx].numSpheres * 3);
+                tools[toolIdx].numSpheres = std::clamp(tools[toolIdx].numSpheres, MIN_SPHERES, MAX_SPHERES);
+                tools[toolIdx].spherePositions.resize(static_cast<size_t>(tools[toolIdx].numSpheres) * 3);
 
                 for (int i = 0; i < tools[toolIdx].numSpheres; ++i)
                 {
@@ -632,9 +682,12 @@ void ViewerWindow::Render() {
 
                     if (ImGui::Button(("Add Tool Definition##" + std::to_string(toolIdx)).c_str()))
                     {
-                        tracker.AddToolDefinition(tools[toolIdx].numSpheres, tools[toolIdx].spherePositions, tools[toolIdx].sphereRadius, tools[toolIdx].toolName);
-                        SaveToolDefinition(tools[toolIdx]);
-                        tools[toolIdx].isAdded = true;
+                        // Only persist/mark added if the tracker actually accepted it.
+                        if (tracker.AddToolDefinition(tools[toolIdx].numSpheres, tools[toolIdx].spherePositions, tools[toolIdx].sphereRadius, tools[toolIdx].toolName))
+                        {
+                            SaveToolDefinition(tools[toolIdx]);
+                            tools[toolIdx].isAdded = true;
+                        }
                     }
                 }
                 else
@@ -649,12 +702,24 @@ void ViewerWindow::Render() {
 				}
 
                 if (!tools[toolIdx].isAdded)
-                {                
+                {
                     ImGui::SameLine();
 
+                    // Calibration needs a live stream (a selected device or a recording).
+                    // Without one, the old code still spawned worker threads and left the
+                    // app wedged "calibrating" — and a second click overwrote a joinable
+                    // std::thread, aborting the process. Also block re-entry while any
+                    // session is already running.
+                    const bool canCalibrate = (selectedDeviceIndex != -1 || recordedFile != "") &&
+                                              !calibrationInitiated && !tracker.IsTrackingTools() &&
+                                              !tracker.IsCalibratingTool();
+                    ImGui::BeginDisabled(!canCalibrate);
                     if (ImGui::Button(("Calibrate Tool##" + std::to_string(toolIdx)).c_str()))
                     {
                         std::cout << "Calibrating tool " << toolIdx + 1 << std::endl;
+                        // Ensure any previous streaming thread is fully joined before we
+                        // replace the handle (destroying a joinable std::thread aborts).
+                        JoinThread(processingThread);
                         if (recordedFile != "")
                         {
                             tracker.initializeFromFile(recordedFile);
@@ -669,6 +734,7 @@ void ViewerWindow::Render() {
                         processingThread = std::make_shared<std::thread>([this]()
                             { this->tracker.processStreams(); });
                     }
+                    ImGui::EndDisabled();
 
                     ImGui::SameLine();
                     if (ImGui::Button(("Load ROM##" + std::to_string(toolIdx)).c_str()))
@@ -679,8 +745,22 @@ void ViewerWindow::Render() {
                         nfdresult_t result = NFD_OpenDialog(&path, filterItem, 1, NULL);
                         if (result == NFD_OKAY && path) {
                             ROMParser parser(path);
-                            tools[toolIdx].numSpheres = parser.GetNumMarkers();
-                            tools[toolIdx].spherePositions = parser.GetMarkerPositions();
+                            const int romMarkers = parser.GetNumMarkers();
+                            const std::vector<float>& romPositions = parser.GetMarkerPositions();
+                            // Only accept a ROM whose marker count is in range and whose
+                            // position array matches; otherwise the next-frame resize and
+                            // indexing would be inconsistent or oversized.
+                            if (romMarkers >= MIN_SPHERES && romMarkers <= MAX_SPHERES &&
+                                romPositions.size() == static_cast<size_t>(romMarkers) * 3)
+                            {
+                                tools[toolIdx].numSpheres = romMarkers;
+                                tools[toolIdx].spherePositions = romPositions;
+                            }
+                            else
+                            {
+                                std::cerr << "Ignoring ROM with unsupported marker count: "
+                                          << romMarkers << std::endl;
+                            }
                             NFD_FreePath(path);
                         }
                         NFD_Quit();
@@ -691,14 +771,47 @@ void ViewerWindow::Render() {
 
         ImGui::End();
 
-        if (!tracker.IsCalibratingTool() && calibrationInitiated)
+        const bool finishCalibration = (!tracker.IsCalibratingTool() && calibrationInitiated);
+        if (finishCalibration)
         {
             std::vector<float> tool_definition = tracker.GetToolDefinition();
-            if (!tool_definition.empty() && !std::isnan(tool_definition[0]) && tool_definition[0] != -1)
+
+            // Validate before accepting: a whole number of spheres in
+            // [MIN_SPHERES, MAX_CALIB_SPHERES], every coordinate finite (no NaN/inf),
+            // and not the "no result" sentinel. Anything else means calibration failed.
+            // Note the lower bound matches MIN_SPHERES so an accepted count is never
+            // bumped (and corrupted) by the per-frame sphere-count clamp above.
+            bool validCalibration = false;
+            const int numFloats = static_cast<int>(tool_definition.size());
+            if (numFloats > 0 && numFloats % 3 == 0 && tool_definition[0] != -1)
             {
-                tools[toolId].numSpheres = tool_definition.size() / 3;
+                const int sphereCount = numFloats / 3;
+                if (sphereCount >= MIN_SPHERES && sphereCount <= MAX_CALIB_SPHERES)
+                {
+                    validCalibration = std::all_of(tool_definition.begin(), tool_definition.end(),
+                                                   [](float v) { return std::isfinite(v); });
+                }
+            }
+
+            if (validCalibration && toolId >= 0 && toolId < static_cast<int>(tools.size()))
+            {
+                tools[toolId].numSpheres = numFloats / 3;
                 tools[toolId].spherePositions = tool_definition;
             }
+            else
+            {
+                // Discard the result and prompt the user to recalibrate.
+                showCalibrationError = true;
+            }
+        }
+
+        // Done mutating `tools` for this frame; release before any blocking teardown
+        // (JoinThread can block inside wait_for_frames up to the frame timeout, and we
+        // must not stall the UDP/CSV workers on toolsMutex while it does).
+        toolsLock.unlock();
+
+        if (finishCalibration)
+        {
             tracker.StopToolCalibration();
             JoinThread(processingThread);
             tracker.shutdown();
@@ -711,6 +824,9 @@ void ViewerWindow::Render() {
             ImGui::Begin("Tracking Control", nullptr, overlayFlags);
             if (!tracker.IsTrackingTools()) {
                 if (ImGui::Button("Start Tracking")) {
+                    // Make sure any previous streaming thread is fully joined before we
+                    // replace the handle (destroying a joinable std::thread aborts).
+                    JoinThread(processingThread);
                     if (recordedFile != "")
                     {
                         tracker.initializeFromFile(recordedFile);
@@ -773,8 +889,10 @@ void ViewerWindow::Render() {
         ImGui::SetNextItemWidth(110);
         ImGui::InputText("IP Address", ipAddress, sizeof(ipAddress));
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(50); 
+        ImGui::SetNextItemWidth(50);
         ImGui::InputInt("Port", &m_port, 0, 0, ImGuiInputTextFlags_CharsDecimal);
+        // Keep within the valid UDP port range; the value is cast to uint16_t later.
+        m_port = std::clamp(m_port, 1, 65535);
         ImGui::SetNextItemWidth(110);
         ImGui::InputInt("Frequency", &frequency);
         ImGui::SameLine();
@@ -817,6 +935,7 @@ void ViewerWindow::Render() {
         ImGui::SameLine();
         ImGui::SetNextItemWidth(50);
         ImGui::InputInt("Receive Port", &m_receiveport, 0, 0, ImGuiInputTextFlags_CharsDecimal);
+        m_receiveport = std::clamp(m_receiveport, 1, 65535);
         ImGui::End();
 
         // GUI for CSV recording
@@ -918,7 +1037,8 @@ void ViewerWindow::Render() {
                         tool_transform = { secondaryData(0, 3), secondaryData(1, 3), secondaryData(2, 3),
                                           q.x(), q.y(), q.z(), q.w() };
 
-                        toolTransforms.clear();
+                        // Consume only this tool's entry, not the whole map.
+                        toolTransforms.erase(i);
                         validSecondaryData = true;
                     }
                 }
@@ -953,6 +1073,29 @@ void ViewerWindow::Render() {
             ImGui::End();
         }
 
+        // Calibration failure popup: shown when a calibration produced an invalid
+        // result (too many spheres, NaN/inf positions, or no data captured).
+        if (showCalibrationError)
+        {
+            ImGui::OpenPopup("Calibration Failed");
+            showCalibrationError = false;
+        }
+        {
+            ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+            ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        }
+        if (ImGui::BeginPopupModal("Calibration Failed", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ImGui::Text("Tool calibration unsuccessful.");
+            ImGui::Text("Please recalibrate the tool.");
+            ImGui::Separator();
+            if (ImGui::Button("OK", ImVec2(120, 0)))
+            {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData( ImGui::GetDrawData() );
 
@@ -979,8 +1122,6 @@ void ViewerWindow::Shutdown() {
     multiEnabled = false;
     csvEnabled = false;
 
-    const bool pipelineRunning = tracker.IsTrackingTools() || tracker.IsCalibratingTool();
-
     tracker.StopToolTracking();
     tracker.StopToolCalibration();
     JoinThread(processingThread);
@@ -988,6 +1129,8 @@ void ViewerWindow::Shutdown() {
     JoinThread(udpReceiveThread);
     JoinThread(csvThread);
 
-    if (pipelineRunning)
-        tracker.shutdown();
+    // shutdown() is idempotent and guarded by pipeline_started, so always call it.
+    // (Gating on IsTracking/IsCalibrating could miss the window where calibration
+    // already finished but its completion teardown hadn't run, leaking the pipeline.)
+    tracker.shutdown();
 }

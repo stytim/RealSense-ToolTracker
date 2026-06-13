@@ -1,6 +1,7 @@
 #include "IRToolTrack.h"
 #include "IRToolTracking.h"
 #include <set>
+#include <limits>
 
 
 IRToolTracker::~IRToolTracker()
@@ -29,13 +30,17 @@ IRToolTracker::~IRToolTracker()
 
 cv::Mat IRToolTracker::GetToolTransform(std::string identifier)
 {
+	std::lock_guard<std::mutex> lock(m_ToolsMutex);
 	if (m_Tools.size() == 0 || m_ToolIndexMapping.count(identifier) == 0)
 		return cv::Mat::zeros(8, 1, CV_32F);
 
 	auto it = m_ToolIndexMapping.find(identifier);
 	int index = it->second;
 
-	cv::Mat transform = m_Tools.at(index).cur_transform;
+	// Deep copy so callers (UDP/CSV/GUI threads) never alias the live buffer that
+	// the tracking thread keeps writing, and so the visibility reset below does not
+	// corrupt the tool's stored transform.
+	cv::Mat transform = m_Tools.at(index).cur_transform.clone();
 	if (m_lTrackedTimestamp != m_Tools.at(index).timestamp)
 	{
 		transform.at<float>(7, 0) = 0.f;
@@ -46,8 +51,9 @@ cv::Mat IRToolTracker::GetToolTransform(std::string identifier)
 
 void IRToolTracker::TrackTools()
 {
+	// m_bIsCurrentlyTracking is set true by StartTracking() before this thread starts,
+	// and cleared on exit below, so callers observe the tracking state synchronously.
 	while (!m_bShouldStop) {
-		m_bIsCurrentlyTracking = true;
 		std::unique_ptr<AHATFrame> rawFrame;
 		{
 			std::lock_guard<std::mutex> lock(m_MutexCurFrame);
@@ -88,9 +94,11 @@ void IRToolTracker::TrackTool(IRTrackedTool &tool, const ProcessedAHATFrame &fra
 
 	const int radius_key = SphereRadiusKey(tool.sphere_radius);
 	auto it_sides = frame.ordered_sides_per_mm.find(radius_key);
-	std::vector<Side> frame_ordered_sides = it_sides->second;
-
 	auto it_map = frame.map_per_mm.find(radius_key);
+	// No precomputed map for this tool's sphere radius in this frame: nothing to match.
+	if (it_sides == frame.ordered_sides_per_mm.end() || it_map == frame.map_per_mm.end())
+		return;
+	std::vector<Side> frame_ordered_sides = it_sides->second;
 	cv::Mat frame_map = it_map->second;
 
 	//Find the set of eligible side to start with - aka sides that have similar length to first side of tool
@@ -257,6 +265,12 @@ void IRToolTracker::UnionSegmentation(std::vector<ToolResultContainer> &raw_solu
 	std::vector<bool> claimed_tools(num_tools, false);
 	std::set<int> used_spheres;
 
+	// Collect the winning poses first (MatchPointsKabsch is heavy and must run without
+	// the lock), then publish them all together under a single lock so readers
+	// (GetToolTransform) observe the per-tool transforms/timestamps and
+	// m_lTrackedTimestamp updated atomically — no torn read, no visibility glitch.
+	std::vector<std::pair<int, cv::Mat>> committed;
+
 	for (const ToolResult &current : unique_solutions)
 	{
 		if (claimed_tools[current.tool_id])
@@ -275,25 +289,39 @@ void IRToolTracker::UnionSegmentation(std::vector<ToolResultContainer> &raw_solu
 		cv::Mat result = MatchPointsKabsch(m_Tools[current.tool_id], frame, current.sphere_ids, current.occluded_nodes);
 		if (result.at<float>(7, 0) == 1.f)
 		{
-			m_Tools.at(current.tool_id).cur_transform = result.clone();
-			m_Tools.at(current.tool_id).timestamp = frame.timestamp;
+			committed.emplace_back(current.tool_id, result.clone());
 		}
 
 		claimed_tools[current.tool_id] = true;
 		used_spheres.insert(current.sphere_ids.begin(), current.sphere_ids.end());
 	}
-	m_lTrackedTimestamp = frame.timestamp;
+
+	{
+		std::lock_guard<std::mutex> lock(m_ToolsMutex);
+		for (auto &c : committed)
+		{
+			m_Tools.at(c.first).cur_transform = c.second;
+			m_Tools.at(c.first).timestamp = frame.timestamp;
+		}
+		m_lTrackedTimestamp = frame.timestamp;
+	}
 }
 
 cv::Mat IRToolTracker::MatchPointsKabsch(IRTrackedTool &tool, const ProcessedAHATFrame &frame, const std::vector<int> &sphere_ids, const std::vector<int> &occluded_nodes) {
 	int num_points = static_cast<int>(tool.num_spheres) - static_cast<int>(occluded_nodes.size());
+	// A degenerate match (no usable points) cannot yield a pose; report invisible.
+	if (num_points <= 0)
+		return cv::Mat::zeros(8, 1, CV_32F);
+
+	auto it_spheres_xyz = frame.spheres_xyz_per_mm.find(SphereRadiusKey(tool.sphere_radius));
+	if (it_spheres_xyz == frame.spheres_xyz_per_mm.end())
+		return cv::Mat::zeros(8, 1, CV_32F);
+	cv::Mat3f frame_spheres_xyz = it_spheres_xyz->second;
+
 	cv::Mat p = cv::Mat(num_points, 3, CV_32F);
 	cv::Mat q = cv::Mat(num_points, 3, CV_32F);
 	cv::Vec3f p_center = cv::Vec3f(0.f);
 	cv::Vec3f q_center = cv::Vec3f(0.f);
-
-	auto it_spheres_xyz = frame.spheres_xyz_per_mm.find(SphereRadiusKey(tool.sphere_radius));
-	cv::Mat3f frame_spheres_xyz = it_spheres_xyz->second;
 
 	cv::Mat hololens_pose_mm = frame.device_pose.clone();
 
@@ -676,8 +704,11 @@ bool IRToolTracker::ProcessFrame(AHATFrame &rawFrame, ProcessedAHATFrame &result
 bool IRToolTracker::AddTool(cv::Mat3f spheres, float sphere_radius, std::string identifier, uint min_visible_spheres, float lowpass_rotation, float lowpass_position)
 {
 	//Do we already have this tool?
-	if (m_ToolIndexMapping.count(identifier) > 0)
-		return false;
+	{
+		std::lock_guard<std::mutex> lock(m_ToolsMutex);
+		if (m_ToolIndexMapping.count(identifier) > 0)
+			return false;
+	}
 
 	bool restartTracking = false;
 	if (m_bIsCurrentlyTracking) {
@@ -706,8 +737,11 @@ bool IRToolTracker::AddTool(cv::Mat3f spheres, float sphere_radius, std::string 
 		tool.sphere_kalman_filters.push_back(IRToolKalmanFilter());
 	}
 	//Add to map so we can find the tool with name
-	m_ToolIndexMapping.insert({ identifier, m_Tools.size() });
-	m_Tools.push_back(tool);
+	{
+		std::lock_guard<std::mutex> lock(m_ToolsMutex);
+		m_ToolIndexMapping.insert({ identifier, m_Tools.size() });
+		m_Tools.push_back(tool);
+	}
 	std::cout<<"Added "<<identifier<<" with "<<tool.num_spheres<<" spheres"<<std::endl;
 
 	if (restartTracking) {
@@ -719,12 +753,11 @@ bool IRToolTracker::AddTool(cv::Mat3f spheres, float sphere_radius, std::string 
 bool IRToolTracker::RemoveTool(std::string identifier)
 {
 	//Do we even have this tool?
-	if (m_ToolIndexMapping.count(identifier) == 0)
-		return false;
-
-
-	auto it = m_ToolIndexMapping.find(identifier);
-	int index = it->second;
+	{
+		std::lock_guard<std::mutex> lock(m_ToolsMutex);
+		if (m_ToolIndexMapping.count(identifier) == 0)
+			return false;
+	}
 
 	bool restartTracking = false;
 	if (m_bIsCurrentlyTracking) {
@@ -732,15 +765,18 @@ bool IRToolTracker::RemoveTool(std::string identifier)
 		StopTracking();
 	}
 
-	m_ToolIndexMapping.erase(identifier);
-	std::vector<IRTrackedTool> oldTools(m_Tools);
-	std::map<std::string, int> oldMapping(m_ToolIndexMapping);
-	m_Tools.clear();
-	m_ToolIndexMapping.clear();
-	for (auto pair : oldMapping)
 	{
-		m_ToolIndexMapping.insert({ pair.first, m_Tools.size() });
-		m_Tools.push_back(oldTools.at(pair.second));
+		std::lock_guard<std::mutex> lock(m_ToolsMutex);
+		m_ToolIndexMapping.erase(identifier);
+		std::vector<IRTrackedTool> oldTools(m_Tools);
+		std::map<std::string, int> oldMapping(m_ToolIndexMapping);
+		m_Tools.clear();
+		m_ToolIndexMapping.clear();
+		for (auto pair : oldMapping)
+		{
+			m_ToolIndexMapping.insert({ pair.first, m_Tools.size() });
+			m_Tools.push_back(oldTools.at(pair.second));
+		}
 	}
 
 	std::cout << "Removed " << identifier  << std::endl;
@@ -757,8 +793,11 @@ bool IRToolTracker::RemoveAllTools()
 	if (m_bIsCurrentlyTracking) {
 		StopTracking();
 	}
-	m_Tools.clear();
-	m_ToolIndexMapping.clear();
+	{
+		std::lock_guard<std::mutex> lock(m_ToolsMutex);
+		m_Tools.clear();
+		m_ToolIndexMapping.clear();
+	}
 	return true;
 }
 
@@ -766,6 +805,11 @@ bool IRToolTracker::StartTracking() {
 	if (m_bIsCurrentlyTracking || m_Tools.size() == 0)
 		return false;
 	m_bShouldStop = false;
+	// Mark tracking active BEFORE spawning the thread. Otherwise there is a window
+	// where IsTracking()==false while the thread is already reading m_Tools, during
+	// which AddTool/RemoveTool would skip StopTracking() and mutate m_Tools out from
+	// under the running tracking thread (use-after-free on vector reallocation).
+	m_bIsCurrentlyTracking = true;
 	m_TrackingThread = std::make_shared<std::thread>(&IRToolTracker::TrackTools, this);
 	return true;
 }
@@ -794,6 +838,8 @@ Eigen::Vector3f cvVec3fToEigen(const cv::Vec3f &cvVec)
 }
 
 Eigen::Vector3f calculateStdDev(const std::vector<Eigen::Vector3f>& points, const Eigen::Vector3f& mean) {
+	if (points.empty())
+		return Eigen::Vector3f::Constant(std::numeric_limits<float>::quiet_NaN());
 	Eigen::Vector3f sumSq(0, 0, 0);
 	for (const auto& point : points) {
 		Eigen::Vector3f diff = point - mean;
@@ -803,6 +849,10 @@ Eigen::Vector3f calculateStdDev(const std::vector<Eigen::Vector3f>& points, cons
 }
 
 Eigen::Vector3f calculateMean(const std::vector<Eigen::Vector3f>& points) {
+	// Empty input would divide by zero; return NaN so the calibration is flagged
+	// invalid by the caller instead of silently producing a (0,0,0) marker.
+	if (points.empty())
+		return Eigen::Vector3f::Constant(std::numeric_limits<float>::quiet_NaN());
 	Eigen::Vector3f sum(0, 0, 0);
 	for (const auto& point : points) {
 		sum += point;
@@ -829,7 +879,10 @@ void IRToolTracker::CalibrateTool()
 	std::vector<ProcessedAHATFrame> processedFrames;
 	processedFrames.reserve(MAX_CALIBRATION_FRAMES);
 
-	while (!m_bShouldStop) {
+	// Exit if asked to stop OR if the streaming pipeline terminated (e.g. no device
+	// connected / device disconnected), otherwise this loop would spin forever
+	// waiting for frames that will never arrive.
+	while (!m_bShouldStop && !m_pRealSenseToolTracking->IsTerminated()) {
 		std::unique_ptr<AHATFrame> rawFrame;
 		{
 			std::lock_guard<std::mutex> lock(m_MutexCurFrame);
@@ -854,28 +907,64 @@ void IRToolTracker::CalibrateTool()
 		}
 	}
 
+	// markerPositions is the calibration result consumed by the GUI. Clear it up front
+	// so that every early-return below leaves an empty result, which the GUI treats as
+	// "calibration unsuccessful".
+	markerPositions.clear();
+
+	const int calib_radius_key = SphereRadiusKey(m_fCalibrationSphereRadius);
+
+	// No frames captured (no device / disconnected / stopped before any frame): there
+	// is nothing to calibrate. Bail out instead of dereferencing processedFrames[0].
+	if (processedFrames.empty())
+	{
+		m_bIsCurrentlyCalibrating = false;
+		return;
+	}
+
 	// Perform calibration, loop through processedFrames
 	std::vector<std::vector<Eigen::Vector3f>> markerPoints;
 
-	// Define the number of calibration spheres based on size of frame_spheres_xyz in the first frame
-	const int calib_radius_key = SphereRadiusKey(m_fCalibrationSphereRadius);
-	NUM_CALIBRATION_SPHERES = processedFrames[0].spheres_xyz_per_mm.at(calib_radius_key).size().height;
+	// Define the number of calibration spheres from the first frame's detected blobs.
+	auto it_first = processedFrames[0].spheres_xyz_per_mm.find(calib_radius_key);
+	if (it_first == processedFrames[0].spheres_xyz_per_mm.end())
+	{
+		m_bIsCurrentlyCalibrating = false;
+		return;
+	}
+	NUM_CALIBRATION_SPHERES = it_first->second.size().height;
+
+	// A tool needs at least 3 spheres to define a coordinate frame, and we refuse to
+	// calibrate more than MAX_CALIBRATION_SPHERES. Either case is reported as failure.
+	if (NUM_CALIBRATION_SPHERES < 3 || NUM_CALIBRATION_SPHERES > MAX_CALIBRATION_SPHERES)
+	{
+		m_bIsCurrentlyCalibrating = false;
+		return;
+	}
 
 	markerPoints.resize(NUM_CALIBRATION_SPHERES);
 	for (ProcessedAHATFrame frame : processedFrames)
 	{
 		auto it_sides = frame.ordered_sides_per_mm.find(calib_radius_key);
-		std::vector<Side> frame_ordered_sides = it_sides->second;
-
 		auto it_spheres_xyz = frame.spheres_xyz_per_mm.find(calib_radius_key);
+		if (it_sides == frame.ordered_sides_per_mm.end() ||
+			it_spheres_xyz == frame.spheres_xyz_per_mm.end())
+			continue;
+		std::vector<Side> frame_ordered_sides = it_sides->second;
 		cv::Mat3f frame_spheres_xyz = it_spheres_xyz->second;
+
+		// Only use frames whose detected-sphere count matches the reference frame;
+		// otherwise the fixed-size indexing below (up to NUM_CALIBRATION_SPHERES) would
+		// read past the end of a frame that detected fewer blobs.
+		if (frame_spheres_xyz.size().height != NUM_CALIBRATION_SPHERES || frame_ordered_sides.empty())
+			continue;
 
 		//Side shortest = frame_ordered_sides.front();
     	Side longest = frame_ordered_sides.back();
 
 		if (std::isnan(longest.distance))
 		{
-			continue; 
+			continue;
 		}
 
 		int tempMarker1ID = longest.id_from;
@@ -901,6 +990,10 @@ void IRToolTracker::CalibrateTool()
 		std::sort(distanceToLine.begin(), distanceToLine.end(), [](const std::pair<int, float> &a, const std::pair<int, float> &b) {
 			return a.second < b.second;
 		});
+
+		// Need at least one off-axis marker to resolve the third coordinate.
+		if (distanceToLine.empty())
+			continue;
 
 		int marker3ID = distanceToLine.front().first;
 		distanceToLine.erase(distanceToLine.begin());

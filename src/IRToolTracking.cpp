@@ -23,22 +23,29 @@ void IRToolTracking::queryDevices() {
 }
 
 void IRToolTracking::initializeFromFile(const std::string& file) {
-    // Get the width and height of the frames from the file
-    rs2::pipeline pipe(ctx);
-    rs2::config cfg;
-    cfg.enable_device_from_file(file);
-    pipe.start(cfg);
-    auto profile = pipe.get_active_profile();
-    auto depth_profile = profile.get_stream(RS2_STREAM_DEPTH).as<rs2::video_stream_profile>();
-    frame_width = depth_profile.width();
-    frame_height = depth_profile.height();
-    pipe.stop();
+    // Runs on the GUI thread; a missing/corrupt recording makes rs2 throw. Catch it so
+    // the app stays alive (Terminated=true makes the subsequent processStreams bail).
+    try {
+        // Get the width and height of the frames from the file
+        rs2::pipeline pipe(ctx);
+        rs2::config cfg;
+        cfg.enable_device_from_file(file);
+        pipe.start(cfg);
+        auto profile = pipe.get_active_profile();
+        auto depth_profile = profile.get_stream(RS2_STREAM_DEPTH).as<rs2::video_stream_profile>();
+        frame_width = depth_profile.width();
+        frame_height = depth_profile.height();
+        pipe.stop();
 
-    // Load the configuration from file
-    config.enable_device_from_file(file);
-    intrinsics_found = false;
-    Terminated = false;
-    playFromFile = true;
+        // Load the configuration from file
+        config.enable_device_from_file(file);
+        intrinsics_found = false;
+        Terminated = false;
+        playFromFile = true;
+    } catch (const std::exception &e) {
+        std::cerr << "Failed to open recording '" << file << "': " << e.what() << std::endl;
+        Terminated = true;
+    }
 }
 
 void IRToolTracking::initialize(int index, int width, int height) {
@@ -49,33 +56,40 @@ void IRToolTracking::initialize(int index, int width, int height) {
         return;
     }
 
-    dev = devices[index];
-    //dev.hardware_reset();
-    std::string model_name = dev.get_info(RS2_CAMERA_INFO_NAME);
-    if (model_name == "Intel RealSense D415") {
-        irThreshold = 100;
-        minSize = 10;
-        maxSize = 300;
+    // Querying/configuring a device handle throws rs2::error if the camera was
+    // unplugged after enumeration. This runs on the GUI thread, so catch it.
+    try {
+        dev = devices[index];
+        //dev.hardware_reset();
+        std::string model_name = dev.get_info(RS2_CAMERA_INFO_NAME);
+        if (model_name == "Intel RealSense D415") {
+            irThreshold = 100;
+            minSize = 10;
+            maxSize = 300;
+        }
+        else if (model_name == "Intel RealSense D435") {
+            irThreshold = 180;
+            minSize = 10;
+            maxSize = 370;
+        }
+        SetThreshold(irThreshold);
+        SetMinMaxSize(minSize, maxSize);
+
+        frame_width = width;
+        frame_height = height;
+        intrinsics_found = false;
+        // Configure the RealSense pipeline
+
+        config.enable_device(dev.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER));
+
+        config.enable_stream(RS2_STREAM_INFRARED, 1, frame_width, frame_height, RS2_FORMAT_Y8, 90);
+        config.enable_stream(RS2_STREAM_DEPTH, frame_width, frame_height, RS2_FORMAT_Z16, 90);
+
+        Terminated = false;
+    } catch (const std::exception &e) {
+        std::cerr << "Failed to initialize device: " << e.what() << std::endl;
+        Terminated = true;
     }
-    else if (model_name == "Intel RealSense D435") {
-        irThreshold = 180;
-        minSize = 10;
-        maxSize = 370;
-    }
-    SetThreshold(irThreshold);
-    SetMinMaxSize(minSize, maxSize);
-
-    frame_width = width;
-    frame_height = height;
-    intrinsics_found = false;
-    // Configure the RealSense pipeline
-
-    config.enable_device(dev.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER));
-
-    config.enable_stream(RS2_STREAM_INFRARED, 1, frame_width, frame_height, RS2_FORMAT_Y8, 90);
-    config.enable_stream(RS2_STREAM_DEPTH, frame_width, frame_height, RS2_FORMAT_Z16, 90);
-
-    Terminated = false;
 }
 
 void IRToolTracking::StartToolCalibration()
@@ -148,16 +162,23 @@ void IRToolTracking::processStreams() {
     // can join us cleanly instead of having the whole process killed.
     try {
         profile = pipeline.start(config);
+        pipeline_started = true;
     } catch (const rs2::error &e) {
         std::cerr << "Error during RealSense pipeline start: " << e.what() << std::endl;
         Terminated = true;
         return;
     }
+
+    // Everything below can throw rs2::error if the device disconnects mid-stream (or
+    // OpenCV throws on a malformed frame). This runs on a worker thread, so an escaping
+    // exception would call std::terminate() and kill the whole app. Catch it, flag the
+    // session as terminated, and return so the GUI thread can join and shut down cleanly.
+    try {
     // Warm up the device
-    for (int i = 0; i < 50; i++) {
+    for (int i = 0; i < 50 && !Terminated; i++) {
         pipeline.wait_for_frames();
     }
-    
+
     // if not on Mac
     #if !defined(__APPLE__)
     {
@@ -215,12 +236,25 @@ void IRToolTracking::processStreams() {
             }
         }
     }
+    } catch (const std::exception &e) {
+        std::cerr << "RealSense streaming stopped: " << e.what() << std::endl;
+        Terminated = true;
+    }
 }
 
 void IRToolTracking::shutdown() {
-    // Clean up resources as necessary
-    pipeline.stop();
-    config.disable_all_streams();
+    // Clean up resources as necessary. stop() throws if the pipeline was never
+    // started (e.g. start() failed), so only stop a pipeline we actually started.
+    // Guard the whole teardown so a disconnected device can't throw out of here.
+    try {
+        if (pipeline_started) {
+            pipeline.stop();
+        }
+        config.disable_all_streams();
+    } catch (const std::exception &e) {
+        std::cerr << "Error during RealSense shutdown: " << e.what() << std::endl;
+    }
+    pipeline_started = false;
     trackingFrame.release();
     depthFrame.release();
 }

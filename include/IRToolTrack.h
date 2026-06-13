@@ -75,6 +75,10 @@ private:
 	std::atomic<bool> m_bShouldStop{false};
 
 	std::vector<IRTrackedTool> m_Tools;
+	// Guards m_Tools, m_ToolIndexMapping and the per-tool cur_transform/timestamp
+	// against concurrent access (GUI thread add/remove vs. UDP/CSV/GUI readers via
+	// GetToolTransform vs. the tracking thread writing results in UnionSegmentation).
+	std::mutex m_ToolsMutex;
 
 	std::unique_ptr<AHATFrame> m_CurrentFrame;
 	std::mutex m_MutexCurFrame;
@@ -108,6 +112,9 @@ private:
 
 	float m_fCalibrationSphereRadius = 6.5f;
 	const int MAX_CALIBRATION_FRAMES = 100;
+	// Hard upper bound on how many spheres a calibration may resolve. A tool with
+	// more than this is rejected as unsuccessful rather than fed downstream.
+	static constexpr int MAX_CALIBRATION_SPHERES = 6;
 	int NUM_CALIBRATION_SPHERES = 4;
 
 	std::vector<float> markerPositions;
