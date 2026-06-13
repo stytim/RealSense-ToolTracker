@@ -38,40 +38,62 @@ double GetCurrentUnixTimestamp() {
 }
 
 // Base directory for app-managed data (tool definitions under Tools/, recorded
-// CSVs). On macOS the app runs as a .app bundle whose working directory is "/",
-// so relative paths like "Tools" would resolve under root and silently fail to
-// load/save. Use a stable per-user location instead, so it behaves the same
-// whether launched from Finder or a terminal. On Windows and Linux the working
-// directory is kept unchanged (paths stay relative to ".").
+// CSVs). When launched from a bundle/installer the working directory is not a
+// writable, predictable location: a macOS .app runs with CWD "/", and a Windows
+// app installed under C:\Program Files\ has a read-only CWD. Relative paths like
+// "Tools" would then resolve somewhere unwritable and create/load/save fails (on
+// Windows the throwing create_directories used to crash the whole app). Use a
+// stable per-user location instead, so behavior is the same whether launched
+// from Finder/Explorer or a terminal. Falls back to "." only when the per-user
+// location can't be determined (or on platforms without one wired up, e.g. Linux).
 static fs::path GetDataDirectory()
 {
+    fs::path dir;
 #if defined(__APPLE__)
     if (const char* home = std::getenv("HOME"); home && *home)
-    {
-        fs::path dir = fs::path(home) / "Library" / "Application Support" / "IR Tracking App";
-        std::error_code ec;
-        fs::create_directories(dir, ec);
-        if (ec)
-        {
-            // Don't fall back to "." here: launched from Finder the working
-            // directory is "/", so that would reintroduce the very problem this
-            // helper exists to avoid. Log why and return the per-user path
-            // anyway, so subsequent file operations fail in an actionable place.
-            std::cerr << "Failed to create data directory " << dir.string()
-                      << ": " << ec.message() << std::endl;
-        }
-        return dir;
-    }
+        dir = fs::path(home) / "Library" / "Application Support" / "IR Tracking App";
+#elif defined(_WIN32)
+    // %LOCALAPPDATA% (e.g. C:\Users\<user>\AppData\Local) — a writable per-user
+    // location. _wdupenv_s avoids the MSVC getenv deprecation warning and keeps
+    // non-ASCII user names intact (wide -> fs::path is exact on Windows).
+    wchar_t* localAppData = nullptr;
+    size_t len = 0;
+    if (_wdupenv_s(&localAppData, &len, L"LOCALAPPDATA") == 0 && localAppData && *localAppData)
+        dir = fs::path(localAppData) / "IR Tracking App";
+    free(localAppData); // safe even when null
 #endif
-    return fs::path(".");
+
+    if (dir.empty())
+        return fs::path("."); // per-user location unavailable / not wired up
+
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec)
+    {
+        // Don't fall back to "." here: the install/bundle CWD is typically not
+        // writable, so that would reintroduce the very problem this helper exists
+        // to avoid. Log why and return the per-user path anyway, so subsequent
+        // file operations fail in an actionable, discoverable place.
+        std::cerr << "Failed to create data directory " << dir.string()
+                  << ": " << ec.message() << std::endl;
+    }
+    return dir;
 }
 
 void ViewerWindow::SaveToolDefinition(const Tool &tool)
 {
     fs::path toolsDir = GetDataDirectory() / "Tools";
-    if (!fs::exists(toolsDir))
+    std::error_code ec;
+    fs::create_directories(toolsDir, ec); // no-op when it already exists
+    if (ec)
     {
-        fs::create_directories(toolsDir); // Create the Tools directory if it doesn't exist
+        // Never throw out of this UI click handler: a read-only data directory
+        // previously propagated a filesystem_error all the way up and terminated
+        // the app. Log and skip persisting instead; the tool is still active for
+        // this session (the tracker already accepted it), it just isn't saved.
+        std::cerr << "Failed to create tools directory " << toolsDir.string()
+                  << ": " << ec.message() << std::endl;
+        return;
     }
 
     // Construct the filename using the tool name
