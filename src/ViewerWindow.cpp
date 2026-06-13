@@ -51,10 +51,16 @@ static fs::path GetDataDirectory()
         fs::path dir = fs::path(home) / "Library" / "Application Support" / "IR Tracking App";
         std::error_code ec;
         fs::create_directories(dir, ec);
-        if (!ec)
+        if (ec)
         {
-            return dir;
+            // Don't fall back to "." here: launched from Finder the working
+            // directory is "/", so that would reintroduce the very problem this
+            // helper exists to avoid. Log why and return the per-user path
+            // anyway, so subsequent file operations fail in an actionable place.
+            std::cerr << "Failed to create data directory " << dir.string()
+                      << ": " << ec.message() << std::endl;
         }
+        return dir;
     }
 #endif
     return fs::path(".");
@@ -192,6 +198,11 @@ void ViewerWindow::Initialize(const std::string& file) {
         std::cerr <<"glfwCreateWindow failed" << std::endl;
         return;
     }
+
+    // Keep the window large enough for the fixed-height docked log console and
+    // the monitor panels. Below this the log console's pinned Y (windowHeight -
+    // kLogConsoleHeight) would go negative and the panels would overlap.
+    glfwSetWindowSizeLimits(window, 940, 600, GLFW_DONT_CARE, GLFW_DONT_CARE);
 
     GLFWimage icon;
     icon.pixels = stbi_load_from_memory(
@@ -1150,7 +1161,8 @@ void ViewerWindow::Render() {
                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
                 ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoFocusOnAppearing;
-            ImGui::SetNextWindowPos(ImVec2(0.0f, logWinHeight - kLogConsoleHeight));
+            ImGui::SetNextWindowPos(ImVec2(0.0f,
+                std::max(0.0f, static_cast<float>(logWinHeight) - kLogConsoleHeight)));
             ImGui::SetNextWindowSize(ImVec2(static_cast<float>(logWinWidth), kLogConsoleHeight));
             ImGui::Begin("Log", nullptr, logFlags);
             LogConsole::Get().DrawContents();
