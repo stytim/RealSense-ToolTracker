@@ -99,6 +99,9 @@ private:
     bool playFromFile = false;
 
     bool intrinsics_found = false;
+    // True only between a successful pipeline.start() and the matching shutdown().
+    // Guards against rs2::pipeline::stop() throwing when start() never succeeded.
+    bool pipeline_started = false;
 
     std::vector<std::string> deviceNames;
 
