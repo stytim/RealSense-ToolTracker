@@ -41,11 +41,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ca-certificates curl gnupg lsb-release \
-            build-essential cmake ninja-build pkg-config patchelf \
+            build-essential cmake ninja-build pkg-config patchelf icoutils \
             libopencv-dev \
             libgl1-mesa-dev libglu1-mesa-dev \
+            libx11-dev libxext-dev \
             libxinerama-dev libxcursor-dev libxi-dev libxrandr-dev \
-            libwayland-dev libxkbcommon-dev \
+            libwayland-dev libxkbcommon-dev wayland-protocols \
             libusb-1.0-0-dev libudev-dev \
             libgtk-3-dev
 
@@ -54,10 +55,26 @@ jobs:
           curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xFB0B24895113F120&options=mr" \
             | sudo gpg --dearmor -o /etc/apt/keyrings/librealsense.gpg
           sudo chmod 0644 /etc/apt/keyrings/librealsense.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/librealsense.gpg] https://librealsense.intel.com/Debian/apt-repo $(lsb_release -cs) main" \
+          # Intel only publishes the apt repo for select Ubuntu LTS codenames
+          # (bionic/focal/jammy/noble). On a newer/interim release the repo 404s
+          # and `apt-get update` fails, so fall back to the newest supported LTS
+          # (its binaries are forward-compatible).
+          RS_CODENAME="$(lsb_release -cs)"
+          # Fall back to the newest supported LTS ONLY when the repo definitively
+          # lacks this codename (Intel returns 403/404 for unsupported releases).
+          # Retry first so a transient network error doesn't silently retarget the
+          # distro — a real outage then fails loudly at apt-get update instead.
+          RS_HTTP="$(curl -sSL -o /dev/null -w '%{http_code}' --retry 3 --retry-connrefused \
+            "https://librealsense.intel.com/Debian/apt-repo/dists/${RS_CODENAME}/Release" || echo 000)"
+          if [ "$RS_HTTP" = "403" ] || [ "$RS_HTTP" = "404" ]; then
+            echo "librealsense apt repo has no '${RS_CODENAME}' (HTTP $RS_HTTP); falling back to noble"
+            RS_CODENAME=noble
+          fi
+          echo "deb [signed-by=/etc/apt/keyrings/librealsense.gpg] https://librealsense.intel.com/Debian/apt-repo ${RS_CODENAME} main" \
             | sudo tee /etc/apt/sources.list.d/librealsense.list
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends librealsense2-dev librealsense2-utils
+          sudo apt-get install -y --no-install-recommends \
+            librealsense2-dev librealsense2-utils librealsense2-udev-rules
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
@@ -160,11 +177,53 @@ jobs:
 
           # Binary + bundled libs under /usr/lib/<pkg>/ with $ORIGIN rpath.
           cp build/ir-tracking-app "$STAGE/usr/lib/$PKG/"
-          ldd build/ir-tracking-app \
-            | awk '/(librealsense|libopencv|libtbb|libusb-1\.0)/ { print $3 }' \
-            | grep -v '^$' | sort -u \
-            | while read -r lib; do cp -L "$lib" "$STAGE/usr/lib/$PKG/"; done
+
+          # Bundle the application's private compute libraries — RealSense,
+          # OpenCV, and whatever THOSE pull in (TBB, protobuf, image codecs, ...)
+          # — so the package never relies on the host shipping the exact sonames
+          # we built against. Those drift across Ubuntu 22.04/24.04/26.04
+          # (libtbb.so.2 -> .so.12, libprotobuf.so.23 absent on 26.04, etc.).
+          #
+          # We compute this set as the *dependency closure of the RealSense +
+          # OpenCV libraries only*, not of the whole binary. That deliberately
+          # excludes the GL / X11 / Wayland / GTK / C++-runtime stack (the binary
+          # links those directly, but RealSense/OpenCV do not depend on them), so
+          # we can never accidentally bundle e.g. libgtk-3 and break the user's
+          # desktop integration. Those host libraries come from Depends instead.
+          # (The previous hand-written allow-list missed libprotobuf.so.23 and
+          # crashed on any host without it.)
+          mapfile -t ROOTS < <(ldd build/ir-tracking-app \
+            | awk '/=> \// && /lib(realsense2|opencv)/ { print $3 }' | sort -u)
+          declare -A SEEN
+          queue=("${ROOTS[@]}")
+          while ((${#queue[@]})); do
+            cur="${queue[0]}"; queue=("${queue[@]:1}")
+            if [[ -n "${SEEN[$cur]:-}" ]]; then continue; fi
+            SEEN["$cur"]=1
+            while read -r dep; do
+              if [[ -n "$dep" && -z "${SEEN[$dep]:-}" ]]; then queue+=("$dep"); fi
+            done < <(ldd "$cur" 2>/dev/null | awk '/=> \//{print $3}')
+          done
+          # Copy the closure, except the host C/C++/system runtime (ABI-stable
+          # and present on every target — bundling an older copy would be wrong).
+          RUNTIME='^(ld-linux|libc|libm|libdl|libpthread|librt|libresolv|libstdc\+\+|libgcc_s|libatomic|libz|liblzma|libzstd|libbz2|libudev|libusb-1\.0|libcrypt)\.'
+          for lib in "${!SEEN[@]}"; do
+            base="$(basename "$lib")"
+            if printf '%s' "$base" | grep -qE "$RUNTIME"; then continue; fi
+            cp -L "$lib" "$STAGE/usr/lib/$PKG/"
+          done
+
+          # $ORIGIN rpath on the binary AND every bundled lib. RUNPATH does not
+          # propagate to a library's *own* dependencies, so without rpath on the
+          # bundled .so files their private deps (libopencv_core -> libtbb.so.2,
+          # libopencv_dnn -> libprotobuf.so.23) would be searched only on the
+          # host and fail wherever those sonames are gone.
           patchelf --set-rpath '$ORIGIN' "$STAGE/usr/lib/$PKG/ir-tracking-app"
+          shopt -s nullglob   # don't iterate a literal '*.so*' if the closure were ever empty
+          for so in "$STAGE/usr/lib/$PKG/"*.so*; do
+            patchelf --set-rpath '$ORIGIN' "$so"
+          done
+          shopt -u nullglob
 
           # Launcher shim on PATH.
           cat > "$STAGE/usr/bin/$PKG" <<SH
@@ -185,8 +244,52 @@ jobs:
           Terminal=false
           EOF
 
-          # dpkg control metadata. Depends covers the runtime system libs we
-          # rely on (GTK for nfd, OpenGL, libusb for RealSense USB).
+          # App icon for desktop launchers (the .desktop above references it by
+          # name). Extract the 256px frame from the multi-resolution .ico.
+          icotool -x -w 256 -h 256 \
+            -o "$STAGE/usr/share/icons/hicolor/256x256/apps/$PKG.png" \
+            resources/app_icon.ico
+
+          # RealSense udev rules so a NON-root user can access the camera. Without
+          # these the USB device nodes are root-only and the app just reports
+          # "No RealSense devices found" even with a camera attached. Shipped by
+          # Intel's librealsense2-udev-rules (installed on the runner) and
+          # reloaded by the postinst below.
+          RULES_SRC="$(ls /lib/udev/rules.d/60-librealsense2-udev-rules.rules \
+                          /usr/lib/udev/rules.d/60-librealsense2-udev-rules.rules 2>/dev/null | head -1)"
+          install -Dm644 "$RULES_SRC" \
+            "$STAGE/lib/udev/rules.d/60-librealsense2-udev-rules.rules"
+
+          # postinst/postrm: reload udev so the rules take effect without a reboot.
+          cat > "$STAGE/DEBIAN/postinst" <<'SH'
+          #!/bin/sh
+          set -e
+          if command -v udevadm >/dev/null 2>&1; then
+              udevadm control --reload-rules || true
+              udevadm trigger || true
+          fi
+          # Refresh the icon cache / desktop database so the launcher entry and
+          # icon appear without a re-login.
+          command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -f /usr/share/icons/hicolor 2>/dev/null || true
+          command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications 2>/dev/null || true
+          exit 0
+          SH
+          cat > "$STAGE/DEBIAN/postrm" <<'SH'
+          #!/bin/sh
+          set -e
+          if command -v udevadm >/dev/null 2>&1; then
+              udevadm control --reload-rules || true
+          fi
+          exit 0
+          SH
+          chmod 0755 "$STAGE/DEBIAN/postinst" "$STAGE/DEBIAN/postrm"
+
+          # dpkg control metadata. Depends covers the host-provided runtime libs
+          # we deliberately do NOT bundle (the GL/GTK/X11/C++-runtime/USB stack).
+          # Names are the Ubuntu 22.04 ones; on 24.04/26.04 the t64 packages
+          # (e.g. libgtk-3-0t64) satisfy them via Provides, so one .deb installs
+          # on all three. libopengl0 provides libOpenGL.so.0, which the binary
+          # links directly — its omission was the original launch crash.
           INSTALLED_KB=$(du -sk "$STAGE" --exclude=DEBIAN | cut -f1)
           cat > "$STAGE/DEBIAN/control" <<EOF
           Package: $PKG
@@ -196,7 +299,7 @@ jobs:
           Architecture: amd64
           Maintainer: Tianyu Song <tianyu@medivis.com>
           Homepage: https://github.com/stytim/RealSense-ToolTracker
-          Depends: libgtk-3-0, libgl1, libusb-1.0-0
+          Depends: libc6, libstdc++6, libgcc-s1, libgtk-3-0, libgl1, libopengl0, libx11-6, libusb-1.0-0, libudev1, zlib1g
           Installed-Size: $INSTALLED_KB
           Description: Intel RealSense IR retro-reflective marker tool tracker
            Tracks passive IR sphere markers from an Intel RealSense camera and

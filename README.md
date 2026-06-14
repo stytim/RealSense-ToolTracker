@@ -31,7 +31,60 @@ This project leverages the versatility of Intel RealSense cameras, enabling high
 ## Building
 Ensure all the prerequisites are installed before proceeding with the build process.
 
-### For Linux and MacOS:
+### Linux (Ubuntu 22.04 / 24.04 / 26.04)
+
+Install the build dependencies. Intel's RealSense apt repo only publishes for
+select LTS codenames (`bionic`/`focal`/`jammy`/`noble`); on a newer release
+(e.g. 26.04 "resolute") it 404s, so the snippet below falls back to the newest
+supported LTS — those packages are forward-compatible.
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  ca-certificates curl gnupg lsb-release \
+  build-essential cmake ninja-build pkg-config patchelf \
+  libopencv-dev \
+  libgl1-mesa-dev libglu1-mesa-dev \
+  libx11-dev libxext-dev \
+  libxinerama-dev libxcursor-dev libxi-dev libxrandr-dev \
+  libwayland-dev libxkbcommon-dev wayland-protocols \
+  libusb-1.0-0-dev libudev-dev \
+  libgtk-3-dev
+
+# Intel RealSense SDK from Intel's apt repo (with LTS-codename fallback)
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xFB0B24895113F120&options=mr" \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/librealsense.gpg
+sudo chmod 0644 /etc/apt/keyrings/librealsense.gpg
+RS_CODENAME="$(lsb_release -cs)"
+curl -fsSL -o /dev/null "https://librealsense.intel.com/Debian/apt-repo/dists/${RS_CODENAME}/Release" || RS_CODENAME=noble
+echo "deb [signed-by=/etc/apt/keyrings/librealsense.gpg] https://librealsense.intel.com/Debian/apt-repo ${RS_CODENAME} main" \
+  | sudo tee /etc/apt/sources.list.d/librealsense.list
+sudo apt-get update
+# librealsense2-udev-rules lets a non-root user access the camera (otherwise the
+# USB device nodes are root-only and the app reports "No RealSense devices found").
+sudo apt-get install -y librealsense2-dev librealsense2-utils librealsense2-udev-rules
+```
+
+> The prebuilt `.deb` already installs these udev rules for you.
+
+Then build:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+```
+
+> The build targets a portable x86-64 baseline so the binary runs on any
+> machine. For a CPU-tuned local build, add `-DIRTRACK_NATIVE_ARCH=ON` (uses
+> `-march=native`; the result is not redistributable).
+
+> Prefer the prebuilt `.deb` from the
+> [Releases page](https://github.com/stytim/RealSense-ToolTracker/releases) if
+> you just want to run the app — it bundles RealSense/OpenCV and installs on
+> Ubuntu 22.04/24.04/26.04.
+
+### For MacOS:
 
 ```bash
 mkdir build && cd build
