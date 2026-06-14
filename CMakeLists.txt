@@ -29,8 +29,20 @@ else()
     # Static library: -fPIC
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
 
-    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -march=native -fstack-protector")
-    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native")
+    # -march=native tunes the binary to the CPU that builds it. That is fine for
+    # a local build, but wrong for a redistributable artifact: the CI release
+    # binary would pick up instructions (e.g. AVX-512) that fault with SIGILL on
+    # a user's older CPU. Default OFF so one Linux build runs on any x86-64 box;
+    # opt in with -DIRTRACK_NATIVE_ARCH=ON for a tuned local performance build.
+    option(IRTRACK_NATIVE_ARCH "Tune the build for the local CPU (-march=native); not portable" OFF)
+    if(IRTRACK_NATIVE_ARCH)
+        set(IRTRACK_ARCH_FLAG "-march=native")
+    else()
+        set(IRTRACK_ARCH_FLAG "")
+    endif()
+
+    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 ${IRTRACK_ARCH_FLAG} -fstack-protector")
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 ${IRTRACK_ARCH_FLAG}")
 endif()
 
 IF(MSVC)

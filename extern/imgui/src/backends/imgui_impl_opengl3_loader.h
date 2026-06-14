@@ -666,8 +666,17 @@ static GL3WglProc (*glx_get_proc_address)(const GLubyte *);
 
 static int open_libgl(void)
 {
-    // While most systems use libGL.so.1, NetBSD seems to use that libGL.so.3. See https://github.com/ocornut/imgui/issues/6983
-    libgl = dlopen("libGL.so", RTLD_LAZY | RTLD_LOCAL);
+    // Open the versioned runtime soname FIRST. The unversioned "libGL.so" only
+    // ships with a -dev package (libgl-dev/mesa), so an end-user machine that
+    // has just the runtime libgl1 would otherwise fail here with
+    // "Failed to initialize OpenGL loader!" and abort. Most Linux systems use
+    // libGL.so.1; NetBSD uses libGL.so.3 (see ocornut/imgui#6983); fall back to
+    // the unversioned name last for dev environments.
+    libgl = dlopen("libGL.so.1", RTLD_LAZY | RTLD_LOCAL);
+    if (!libgl)
+        libgl = dlopen("libGL.so.3", RTLD_LAZY | RTLD_LOCAL);
+    if (!libgl)
+        libgl = dlopen("libGL.so", RTLD_LAZY | RTLD_LOCAL);
     if (!libgl)
         return GL3W_ERROR_LIBRARY_OPEN;
     *(void **)(&glx_get_proc_address) = dlsym(libgl, "glXGetProcAddressARB");

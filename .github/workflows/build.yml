@@ -50,8 +50,9 @@ jobs:
             build-essential cmake ninja-build pkg-config \
             libopencv-dev \
             libgl1-mesa-dev libglu1-mesa-dev \
+            libx11-dev libxext-dev \
             libxinerama-dev libxcursor-dev libxi-dev libxrandr-dev \
-            libwayland-dev libxkbcommon-dev \
+            libwayland-dev libxkbcommon-dev wayland-protocols \
             libusb-1.0-0-dev libudev-dev \
             libgtk-3-dev
 
@@ -67,7 +68,21 @@ jobs:
           curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xFB0B24895113F120&options=mr" \
             | sudo gpg --dearmor -o /etc/apt/keyrings/librealsense.gpg
           sudo chmod 0644 /etc/apt/keyrings/librealsense.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/librealsense.gpg] https://librealsense.intel.com/Debian/apt-repo $(lsb_release -cs) main" \
+          # Intel only publishes the apt repo for select Ubuntu LTS codenames
+          # (bionic/focal/jammy/noble). On a newer/interim release the repo 404s
+          # and `apt-get update` fails, so fall back to the newest supported LTS.
+          RS_CODENAME="$(lsb_release -cs)"
+          # Fall back to the newest supported LTS ONLY when the repo definitively
+          # lacks this codename (Intel returns 403/404 for unsupported releases).
+          # Retry first so a transient network error doesn't silently retarget the
+          # distro — a real outage then fails loudly at apt-get update instead.
+          RS_HTTP="$(curl -sSL -o /dev/null -w '%{http_code}' --retry 3 --retry-connrefused \
+            "https://librealsense.intel.com/Debian/apt-repo/dists/${RS_CODENAME}/Release" || echo 000)"
+          if [ "$RS_HTTP" = "403" ] || [ "$RS_HTTP" = "404" ]; then
+            echo "librealsense apt repo has no '${RS_CODENAME}' (HTTP $RS_HTTP); falling back to noble"
+            RS_CODENAME=noble
+          fi
+          echo "deb [signed-by=/etc/apt/keyrings/librealsense.gpg] https://librealsense.intel.com/Debian/apt-repo ${RS_CODENAME} main" \
             | sudo tee /etc/apt/sources.list.d/librealsense.list
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends librealsense2-dev librealsense2-utils
